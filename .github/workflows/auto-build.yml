@@ -166,11 +166,19 @@ jobs:
         with:
           github-token: ${{ secrets.RELEASE_TOKEN }}
           script: |
-            const tag = '${{ needs.check_upstream.outputs.upstream_tag }}';
-            console.log('Triggering docker.yml with tag:', tag);
+            // 优先使用上游 tag，备选使用 yyyymmdd
+            let tag = '${{ needs.check_upstream.outputs.upstream_tag }}';
             
             if (!tag || tag.trim() === '') {
-              throw new Error('Tag is empty or undefined');
+              // 获取当前日期 yyyymmdd
+              const now = new Date();
+              const year = now.getFullYear();
+              const month = String(now.getMonth() + 1).padStart(2, '0');
+              const day = String(now.getDate()).padStart(2, '0');
+              tag = `${year}${month}${day}`;
+              console.log('使用日期作为 tag:', tag);
+            } else {
+              console.log('使用上游 tag:', tag);
             }
             
             await github.rest.actions.createWorkflowDispatch({
