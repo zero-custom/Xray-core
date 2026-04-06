@@ -84,7 +84,7 @@ jobs:
         with:
           repository: zero-custom/Xray-core
           ref: main
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.RELEASE_TOKEN }}
           fetch-depth: 1
           
       - name: 设置 Go
@@ -193,7 +193,7 @@ jobs:
         with:
           repository: zero-custom/Xray-core
           ref: main
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.RELEASE_TOKEN }}
           fetch-depth: 1
           
       - name: 设置 Go
