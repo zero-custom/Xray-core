@@ -69,7 +69,7 @@ jobs:
             echo "should_build=false" >> $GITHUB_OUTPUT
           fi
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}
 
   build:
     needs: check_upstream
@@ -120,7 +120,7 @@ jobs:
           git commit -m "chore: sync with upstream" || echo "No changes to commit"
           git push origin main || echo "Push failed"
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}
 
   # 定时触发时自动创建 Release 并触发 Docker workflow
   auto_release:
@@ -146,7 +146,7 @@ jobs:
           
           # 使用上游版本号创建 release
           curl -X POST \
-            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Authorization: token ${{ secrets.RELEASE_TOKEN }}" \
             -H "Content-Type: application/json" \
             -d '{
               "tag_name": "'"$UPSTREAM_TAG"'",
@@ -159,12 +159,12 @@ jobs:
           
           echo "已创建 Release: $UPSTREAM_TAG"
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}
 
       - name: 触发 Docker workflow (复用 docker.yml，支持 Docker Hub)
         uses: actions/github-script@v8
         with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
+          github-token: ${{ secrets.RELEASE_TOKEN }}
           script: |
             await github.rest.actions.createWorkflowDispatch({
               owner: 'zero-custom',
@@ -257,4 +257,4 @@ jobs:
           draft: false
           prerelease: false
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}
