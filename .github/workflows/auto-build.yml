@@ -108,7 +108,7 @@ jobs:
       - name: 上传产物
         uses: actions/upload-artifact@v4
         with:
-          name: xray-bin
+          name: xray-bin-build
           path: xray
           retention-days: 30
           
@@ -136,7 +136,7 @@ jobs:
       - name: 下载编译产物
         uses: actions/download-artifact@v4
         with:
-          name: xray-bin
+          name: xray-bin-build
           path: .
           
       - name: 创建 Release
