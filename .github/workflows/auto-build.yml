@@ -161,18 +161,31 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}
 
+      - name: 调试输出
+        run: |
+          echo "upstream_tag: '${{ needs.check_upstream.outputs.upstream_tag }}'"
+          echo "current_tag: '${{ needs.check_upstream.outputs.current_tag }}'"
+          echo "is_schedule: '${{ needs.check_upstream.outputs.is_schedule }}'"
+
       - name: 触发 Docker workflow (复用 docker.yml，支持 Docker Hub)
         uses: actions/github-script@v8
         with:
           github-token: ${{ secrets.RELEASE_TOKEN }}
           script: |
+            const tag = '${{ needs.check_upstream.outputs.upstream_tag }}';
+            console.log('Triggering docker.yml with tag:', tag);
+            
+            if (!tag || tag.trim() === '') {
+              throw new Error('Tag is empty or undefined');
+            }
+            
             await github.rest.actions.createWorkflowDispatch({
               owner: 'zero-custom',
               repo: 'Xray-core',
               workflow_id: 'docker.yml',
               ref: 'main',
               inputs: {
-                tag: '${{ needs.check_upstream.outputs.upstream_tag }}',
+                tag: tag,
                 latest: 'true',
                 registry: 'dockerhub'
               }
