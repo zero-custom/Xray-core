@@ -1,0 +1,250 @@
+name: Auto Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      sync_upstream:
+        description: '同步上游代码'
+        required: false
+        default: 'false'
+        type: boolean
+  release:
+    types: [published]
+  schedule:
+    # 每小时检查一次上游是否有新 release
+    - cron: '0 * * * *'
+
+jobs:
+  check_upstream:
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.check.outputs.should_build }}
+      upstream_tag: ${{ steps.check.outputs.upstream_tag }}
+      current_tag: ${{ steps.check.outputs.current_tag }}
+      is_schedule: ${{ steps.check.outputs.is_schedule }}
+    steps:
+      - name: 克隆仓库
+        uses: actions/checkout@v4
+        with:
+          repository: zero-custom/Xray-core
+          ref: main
+          fetch-depth: 1
+
+      - name: 判断触发类型
+        id: check
+        run: |
+          # 判断是否为 schedule 触发
+          if [[ "${{ github.event_name }}" == "schedule" ]]; then
+            echo "is_schedule=true" >> $GITHUB_OUTPUT
+          else
+            echo "is_schedule=false" >> $GITHUB_OUTPUT
+          fi
+          
+          # 获取上游最新 release tag
+          UPSTREAM_TAG=$(curl -s https://api.github.com/repos/XTLS/Xray-core/releases/latest | jq -r '.tag_name // empty')
+          
+          if [ -z "$UPSTREAM_TAG" ]; then
+            echo "无法获取上游版本"
+            echo "should_build=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          echo "上游最新版本: $UPSTREAM_TAG"
+          
+          # 获取当前仓库的最新 release tag
+          CURRENT_TAG=$(curl -s https://api.github.com/repos/zero-custom/Xray-core/releases/latest | jq -r '.tag_name // empty')
+          
+          echo "本地最新版本: $CURRENT_TAG"
+          echo "upstream_tag=$UPSTREAM_TAG" >> $GITHUB_OUTPUT
+          echo "current_tag=$CURRENT_TAG" >> $GITHUB_OUTPUT
+          
+          # 比较版本，判断是否需要构建
+          if [ "$CURRENT_TAG" != "$UPSTREAM_TAG" ]; then
+            echo "检测到新版本: $UPSTREAM_TAG (本地: $CURRENT_TAG)"
+            echo "should_build=true" >> $GITHUB_OUTPUT
+          else
+            echo "已是最新版本，无需构建"
+            echo "should_build=false" >> $GITHUB_OUTPUT
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build:
+    needs: check_upstream
+    if: needs.check_upstream.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: 克隆仓库
+        uses: actions/checkout@v4
+        with:
+          repository: zero-custom/Xray-core
+          ref: main
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 1
+          
+      - name: 设置 Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          
+      - name: 同步上游
+        run: |
+          git remote add upstream https://github.com/XTLS/Xray-core.git
+          git fetch upstream
+          git checkout main
+          git merge upstream/main --no-edit || echo "No changes to merge"
+          
+      - name: 编译
+        env:
+          GOPROXY: https://mirrors.tencent.com/
+        run: |
+          CGO_ENABLED=0 go build -o xray -trimpath -buildvcs=false -ldflags="-s -w -buildid=" ./main
+          
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: xray-bin
+          path: xray
+          retention-days: 30
+          
+      - name: 提交更改
+        run: |
+          git config user.name "GitHub Action"
+          git config user.email "action@github.com"
+          git add -A
+          git commit -m "chore: sync with upstream" || echo "No changes to commit"
+          git push origin main || echo "Push failed"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # 定时触发时自动创建 Release 并触发 Docker workflow
+  auto_release:
+    needs: build
+    if: needs.check_upstream.outputs.should_build == 'true' && needs.check_upstream.outputs.is_schedule == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+      - name: 下载编译产物
+        uses: actions/download-artifact@v4
+        with:
+          name: xray-bin
+          path: .
+          
+      - name: 创建 Release
+        id: create_release
+        run: |
+          UPSTREAM_TAG="${{ needs.check_upstream.outputs.upstream_tag }}"
+          
+          # 使用上游版本号创建 release
+          curl -X POST \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "tag_name": "'"$UPSTREAM_TAG"'",
+              "name": "'"$UPSTREAM_TAG"' + mTLS",
+              "body": "Xray-core with mTLS client certificate support.\n\nBased on upstream release: '"$UPSTREAM_TAG"'\n\n## Features\n▪ mTLS client certificate support\n▪ Compatible with uTLS fingerprint\n▪ Support for file path or inline PEM format",
+              "draft": false,
+              "prerelease": false
+            }' \
+            https://api.github.com/repos/zero-custom/Xray-core/releases
+          
+          echo "已创建 Release: $UPSTREAM_TAG"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 触发 Docker workflow (复用 docker.yml，支持 Docker Hub)
+        uses: actions/github-script@v8
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: 'zero-custom',
+              repo: 'Xray-core',
+              workflow_id: 'docker.yml',
+              ref: 'main',
+              inputs: {
+                tag: '${{ needs.check_upstream.outputs.upstream_tag }}',
+                latest: 'true',
+                registry: 'dockerhub'
+              }
+            });
+            console.log('Triggered docker.yml for auto release to Docker Hub');
+
+  # 手动触发时只构建不上传
+  manual_build:
+    needs: check_upstream
+    if: needs.check_upstream.outputs.should_build == 'true' && needs.check_upstream.outputs.is_schedule == 'false' && github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: 克隆仓库
+        uses: actions/checkout@v4
+        with:
+          repository: zero-custom/Xray-core
+          ref: main
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 1
+          
+      - name: 设置 Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          
+      - name: 同步上游 (如果选择了 sync_upstream)
+        if: github.event_name == 'workflow_dispatch' && inputs.sync_upstream == 'true'
+        run: |
+          git remote add upstream https://github.com/XTLS/Xray-core.git
+          git fetch upstream
+          git checkout main
+          git merge upstream/main --no-edit || echo "No changes to merge"
+          
+      - name: 编译
+        env:
+          GOPROXY: https://mirrors.tencent.com/
+        run: |
+          CGO_ENABLED=0 go build -o xray -trimpath -buildvcs=false -ldflags="-s -w -buildid=" ./main
+          
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: xray-bin
+          path: xray
+          retention-days: 30
+
+  # 已有 release 触发时创建 Release (docker.yml 会自动处理 Docker 镜像)
+  release:
+    needs: build
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: 下载编译产物
+        uses: actions/download-artifact@v4
+        with:
+          name: xray-bin
+          path: .
+          
+      - name: 创建 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.event.release.tag_name }} + mTLS
+          body: |
+            Xray-core with mTLS client certificate support.
+            
+            Based on upstream release: ${{ github.event.release.tag_name }}
+            
+            ## Features
+            ▪ mTLS client certificate support
+
+            ▪ Compatible with uTLS fingerprint
+
+            ▪ Support for file path or inline PEM format
+
+          files: xray
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

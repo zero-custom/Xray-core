@@ -15,6 +15,13 @@ on:
         description: "Set to latest"
         type: boolean
         default: false
+      registry:
+        description: "Registry to push (dockerhub or ghcr.io)"
+        type: choice
+        default: dockerhub
+        options:
+          - dockerhub
+          - ghcr.io
 
 jobs:
   build-and-push:
@@ -25,13 +32,6 @@ jobs:
       packages: write
 
     steps:
-      - name: Set repository and image name to lowercase
-        env:
-          IMAGE_NAME: "${{ github.repository }}"
-        run: |
-          echo "IMAGE_NAME=${IMAGE_NAME,,}" >>${GITHUB_ENV}
-          echo "FULL_IMAGE_NAME=ghcr.io/${IMAGE_NAME,,}" >>${GITHUB_ENV}
-
       - name: Validate and extract tag
         run: |
           SOURCE_TAG="${{ github.event.inputs.tag }}"
@@ -64,6 +64,24 @@ jobs:
           echo "Latest: '$LATEST'."
           echo "LATEST=$LATEST" >>${GITHUB_ENV}
 
+      - name: Set registry and image name
+        env:
+          INPUT_REGISTRY: "${{ github.event.inputs.registry }}"
+        run: |
+          REGISTRY="${INPUT_REGISTRY:-dockerhub}"
+          echo "REGISTRY=$REGISTRY" >>${GITHUB_ENV}
+          
+          if [[ "$REGISTRY" == "dockerhub" ]]; then
+            # Docker Hub: use DOCKER_USERNAME
+            echo "FULL_IMAGE_NAME=${{ secrets.DOCKER_USERNAME }}/xray" >>${GITHUB_ENV}
+          else
+            # GitHub Container Registry
+            IMAGE_NAME="${{ github.repository }}"
+            echo "FULL_IMAGE_NAME=ghcr.io/${IMAGE_NAME,,}" >>${GITHUB_ENV}
+          fi
+          
+          echo "Full image name: '${{ env.FULL_IMAGE_NAME }}'."
+
       - name: Checkout code
         uses: actions/checkout@v6
 
@@ -73,7 +91,15 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
+      - name: Login to Docker Hub
+        if: env.REGISTRY == 'dockerhub'
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
       - name: Login to GitHub Container Registry
+        if: env.REGISTRY == 'ghcr.io'
         uses: docker/login-action@v4
         with:
           registry: ghcr.io
