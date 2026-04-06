@@ -17,8 +17,6 @@ on:
 jobs:
   check_upstream:
     runs-on: ubuntu-latest
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     outputs:
       should_build: ${{ steps.check.outputs.should_build }}
       upstream_tag: ${{ steps.check.outputs.upstream_tag }}
@@ -75,8 +73,6 @@ jobs:
     needs: check_upstream
     if: needs.check_upstream.outputs.should_build == 'true'
     runs-on: ubuntu-latest
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     
     steps:
       - name: 克隆仓库
@@ -127,8 +123,6 @@ jobs:
     needs: build
     if: needs.check_upstream.outputs.should_build == 'true' && needs.check_upstream.outputs.is_schedule == 'true'
     runs-on: ubuntu-latest
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     permissions:
       contents: write
     
@@ -182,7 +176,7 @@ jobs:
             await github.rest.actions.createWorkflowDispatch({
               owner: 'zero-custom',
               repo: 'Xray-core',
-              workflow_id: 'docker.yml',
+              workflow_id: 256177639,
               ref: 'main',
               inputs: {
                 tag: tag,
@@ -197,8 +191,6 @@ jobs:
     needs: check_upstream
     if: needs.check_upstream.outputs.should_build == 'true' && needs.check_upstream.outputs.is_schedule == 'false' && github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     
     steps:
       - name: 克隆仓库
@@ -240,8 +232,6 @@ jobs:
     needs: build
     if: github.event_name == 'release'
     runs-on: ubuntu-latest
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     
     steps:
       - name: 下载编译产物
