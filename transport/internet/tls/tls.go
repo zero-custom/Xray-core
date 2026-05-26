@@ -155,6 +155,29 @@ func copyConfig(c *tls.Config) *utls.Config {
 		EncryptedClientHelloConfigList: c.EncryptedClientHelloConfigList,
 		NextProtos:                     c.NextProtos,
 	}
+
+	if c.GetClientCertificate != nil {
+		origFunc := c.GetClientCertificate
+		config.GetClientCertificate = func(cri *utls.CertificateRequestInfo) (*utls.Certificate, error) {
+			tlsCert, err := origFunc(&tls.CertificateRequestInfo{
+				AcceptableCAs: cri.AcceptableCAs,
+			})
+			if err != nil || tlsCert == nil {
+				return nil, err
+			}
+			return &utls.Certificate{
+				Certificate:                 tlsCert.Certificate,
+				PrivateKey:                  tlsCert.PrivateKey,
+				OCSPStaple:                  tlsCert.OCSPStaple,
+				SignedCertificateTimestamps: tlsCert.SignedCertificateTimestamps,
+			}, nil
+		}
+	}
+
+	if config.EncryptedClientHelloConfigList != nil {
+		config.NextProtos = c.NextProtos
+	}
+
 	return config
 }
 
