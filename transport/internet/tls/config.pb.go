@@ -244,6 +244,82 @@ func (x *ClientCertificate) GetKeyPath() string {
 	return ""
 }
 
+// CA certificate for dynamically signing client certificates.
+// When configured, the CA will issue client certificates on-the-fly
+// instead of requiring pre-configured ClientCertificate entries.
+// Auto-renewal: expired client certs are re-signed automatically.
+type CACertificate struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// CA certificate in PEM format (used as parent CA)
+	Certificate []byte `protobuf:"bytes,1,opt,name=certificate,proto3" json:"certificate,omitempty"`
+	// CA private key in PEM format (used to sign new client certs)
+	Key []byte `protobuf:"bytes,2,opt,name=key,proto3" json:"key,omitempty"`
+	// File path to CA certificate (alternative to inline PEM)
+	CertificatePath string `protobuf:"bytes,3,opt,name=certificate_path,json=certificatePath,proto3" json:"certificate_path,omitempty"`
+	// File path to CA key (alternative to inline PEM)
+	KeyPath       string `protobuf:"bytes,4,opt,name=key_path,json=keyPath,proto3" json:"key_path,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CACertificate) Reset() {
+	*x = CACertificate{}
+	mi := &file_transport_internet_tls_config_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CACertificate) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CACertificate) ProtoMessage() {}
+
+func (x *CACertificate) ProtoReflect() protoreflect.Message {
+	mi := &file_transport_internet_tls_config_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CACertificate.ProtoReflect.Descriptor instead.
+func (*CACertificate) Descriptor() ([]byte, []int) {
+	return file_transport_internet_tls_config_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *CACertificate) GetCertificate() []byte {
+	if x != nil {
+		return x.Certificate
+	}
+	return nil
+}
+
+func (x *CACertificate) GetKey() []byte {
+	if x != nil {
+		return x.Key
+	}
+	return nil
+}
+
+func (x *CACertificate) GetCertificatePath() string {
+	if x != nil {
+		return x.CertificatePath
+	}
+	return ""
+}
+
+func (x *CACertificate) GetKeyPath() string {
+	if x != nil {
+		return x.KeyPath
+	}
+	return ""
+}
+
 type Config struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	AllowInsecure bool                   `protobuf:"varint,1,opt,name=allow_insecure,json=allowInsecure,proto3" json:"allow_insecure,omitempty"`
@@ -269,21 +345,25 @@ type Config struct {
 	RejectUnknownSni bool   `protobuf:"varint,12,opt,name=reject_unknown_sni,json=rejectUnknownSni,proto3" json:"reject_unknown_sni,omitempty"`
 	MasterKeyLog     string `protobuf:"bytes,15,opt,name=master_key_log,json=masterKeyLog,proto3" json:"master_key_log,omitempty"`
 	// Lists of string as CurvePreferences values.
-	CurvePreferences     []string               `protobuf:"bytes,16,rep,name=curve_preferences,json=curvePreferences,proto3" json:"curve_preferences,omitempty"`
-	VerifyPeerCertByName []string               `protobuf:"bytes,17,rep,name=verify_peer_cert_by_name,json=verifyPeerCertByName,proto3" json:"verify_peer_cert_by_name,omitempty"`
-	EchServerKeys        []byte                 `protobuf:"bytes,18,opt,name=ech_server_keys,json=echServerKeys,proto3" json:"ech_server_keys,omitempty"`
-	EchConfigList        string                 `protobuf:"bytes,19,opt,name=ech_config_list,json=echConfigList,proto3" json:"ech_config_list,omitempty"`
+	CurvePreferences     []string `protobuf:"bytes,16,rep,name=curve_preferences,json=curvePreferences,proto3" json:"curve_preferences,omitempty"`
+	VerifyPeerCertByName []string `protobuf:"bytes,17,rep,name=verify_peer_cert_by_name,json=verifyPeerCertByName,proto3" json:"verify_peer_cert_by_name,omitempty"`
+	EchServerKeys        []byte   `protobuf:"bytes,18,opt,name=ech_server_keys,json=echServerKeys,proto3" json:"ech_server_keys,omitempty"`
+	EchConfigList        string   `protobuf:"bytes,19,opt,name=ech_config_list,json=echConfigList,proto3" json:"ech_config_list,omitempty"`
+	// Deprecated
 	EchForceQuery        string                 `protobuf:"bytes,20,opt,name=ech_force_query,json=echForceQuery,proto3" json:"ech_force_query,omitempty"`
 	EchSocketSettings    *internet.SocketConfig `protobuf:"bytes,21,opt,name=ech_socket_settings,json=echSocketSettings,proto3" json:"ech_socket_settings,omitempty"`
 	PinnedPeerCertSha256 [][]byte               `protobuf:"bytes,22,rep,name=pinned_peer_cert_sha256,json=pinnedPeerCertSha256,proto3" json:"pinned_peer_cert_sha256,omitempty"`
 	ClientCertificate    []*ClientCertificate   `protobuf:"bytes,23,rep,name=client_certificate,json=clientCertificate,proto3" json:"client_certificate,omitempty"`
-	unknownFields        protoimpl.UnknownFields
-	sizeCache            protoimpl.SizeCache
+	// CA certificate for dynamically signing client certificates
+	// Only one CA certificate is allowed
+	CaCertificate *CACertificate `protobuf:"bytes,24,opt,name=ca_certificate,json=caCertificate,proto3" json:"ca_certificate,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Config) Reset() {
 	*x = Config{}
-	mi := &file_transport_internet_tls_config_proto_msgTypes[2]
+	mi := &file_transport_internet_tls_config_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -295,7 +375,7 @@ func (x *Config) String() string {
 func (*Config) ProtoMessage() {}
 
 func (x *Config) ProtoReflect() protoreflect.Message {
-	mi := &file_transport_internet_tls_config_proto_msgTypes[2]
+	mi := &file_transport_internet_tls_config_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -308,7 +388,7 @@ func (x *Config) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Config.ProtoReflect.Descriptor instead.
 func (*Config) Descriptor() ([]byte, []int) {
-	return file_transport_internet_tls_config_proto_rawDescGZIP(), []int{2}
+	return file_transport_internet_tls_config_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *Config) GetAllowInsecure() bool {
@@ -451,6 +531,13 @@ func (x *Config) GetClientCertificate() []*ClientCertificate {
 	return nil
 }
 
+func (x *Config) GetCaCertificate() *CACertificate {
+	if x != nil {
+		return x.CaCertificate
+	}
+	return nil
+}
+
 var File_transport_internet_tls_config_proto protoreflect.FileDescriptor
 
 const file_transport_internet_tls_config_proto_rawDesc = "" +
@@ -474,7 +561,12 @@ const file_transport_internet_tls_config_proto_rawDesc = "" +
 	"\vcertificate\x18\x01 \x01(\fR\vcertificate\x12\x10\n" +
 	"\x03key\x18\x02 \x01(\fR\x03key\x12)\n" +
 	"\x10certificate_path\x18\x03 \x01(\tR\x0fcertificatePath\x12\x19\n" +
-	"\bkey_path\x18\x04 \x01(\tR\akeyPath\"\xd4\a\n" +
+	"\bkey_path\x18\x04 \x01(\tR\akeyPath\"\x89\x01\n" +
+	"\rCACertificate\x12 \n" +
+	"\vcertificate\x18\x01 \x01(\fR\vcertificate\x12\x10\n" +
+	"\x03key\x18\x02 \x01(\fR\x03key\x12)\n" +
+	"\x10certificate_path\x18\x03 \x01(\tR\x0fcertificatePath\x12\x19\n" +
+	"\bkey_path\x18\x04 \x01(\tR\akeyPath\"\xa7\b\n" +
 	"\x06Config\x12%\n" +
 	"\x0eallow_insecure\x18\x01 \x01(\bR\rallowInsecure\x12J\n" +
 	"\vcertificate\x18\x02 \x03(\v2(.xray.transport.internet.tls.CertificateR\vcertificate\x12\x1f\n" +
@@ -498,7 +590,8 @@ const file_transport_internet_tls_config_proto_rawDesc = "" +
 	"\x0fech_force_query\x18\x14 \x01(\tR\rechForceQuery\x12U\n" +
 	"\x13ech_socket_settings\x18\x15 \x01(\v2%.xray.transport.internet.SocketConfigR\x11echSocketSettings\x125\n" +
 	"\x17pinned_peer_cert_sha256\x18\x16 \x03(\fR\x14pinnedPeerCertSha256\x12]\n" +
-	"\x12client_certificate\x18\x17 \x03(\v2..xray.transport.internet.tls.ClientCertificateR\x11clientCertificateBs\n" +
+	"\x12client_certificate\x18\x17 \x03(\v2..xray.transport.internet.tls.ClientCertificateR\x11clientCertificate\x12Q\n" +
+	"\x0eca_certificate\x18\x18 \x01(\v2*.xray.transport.internet.tls.CACertificateR\rcaCertificateBs\n" +
 	"\x1fcom.xray.transport.internet.tlsP\x01Z0github.com/xtls/xray-core/transport/internet/tls\xaa\x02\x1bXray.Transport.Internet.Tlsb\x06proto3"
 
 var (
@@ -514,24 +607,26 @@ func file_transport_internet_tls_config_proto_rawDescGZIP() []byte {
 }
 
 var file_transport_internet_tls_config_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_transport_internet_tls_config_proto_msgTypes = make([]protoimpl.MessageInfo, 3)
+var file_transport_internet_tls_config_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
 var file_transport_internet_tls_config_proto_goTypes = []any{
 	(Certificate_Usage)(0),        // 0: xray.transport.internet.tls.Certificate.Usage
 	(*Certificate)(nil),           // 1: xray.transport.internet.tls.Certificate
 	(*ClientCertificate)(nil),     // 2: xray.transport.internet.tls.ClientCertificate
-	(*Config)(nil),                // 3: xray.transport.internet.tls.Config
-	(*internet.SocketConfig)(nil), // 4: xray.transport.internet.SocketConfig
+	(*CACertificate)(nil),         // 3: xray.transport.internet.tls.CACertificate
+	(*Config)(nil),                // 4: xray.transport.internet.tls.Config
+	(*internet.SocketConfig)(nil), // 5: xray.transport.internet.SocketConfig
 }
 var file_transport_internet_tls_config_proto_depIdxs = []int32{
 	0, // 0: xray.transport.internet.tls.Certificate.usage:type_name -> xray.transport.internet.tls.Certificate.Usage
 	1, // 1: xray.transport.internet.tls.Config.certificate:type_name -> xray.transport.internet.tls.Certificate
-	4, // 2: xray.transport.internet.tls.Config.ech_socket_settings:type_name -> xray.transport.internet.SocketConfig
+	5, // 2: xray.transport.internet.tls.Config.ech_socket_settings:type_name -> xray.transport.internet.SocketConfig
 	2, // 3: xray.transport.internet.tls.Config.client_certificate:type_name -> xray.transport.internet.tls.ClientCertificate
-	4, // [4:4] is the sub-list for method output_type
-	4, // [4:4] is the sub-list for method input_type
-	4, // [4:4] is the sub-list for extension type_name
-	4, // [4:4] is the sub-list for extension extendee
-	0, // [0:4] is the sub-list for field type_name
+	3, // 4: xray.transport.internet.tls.Config.ca_certificate:type_name -> xray.transport.internet.tls.CACertificate
+	5, // [5:5] is the sub-list for method output_type
+	5, // [5:5] is the sub-list for method input_type
+	5, // [5:5] is the sub-list for extension type_name
+	5, // [5:5] is the sub-list for extension extendee
+	0, // [0:5] is the sub-list for field type_name
 }
 
 func init() { file_transport_internet_tls_config_proto_init() }
@@ -545,7 +640,7 @@ func file_transport_internet_tls_config_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_transport_internet_tls_config_proto_rawDesc), len(file_transport_internet_tls_config_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   3,
+			NumMessages:   4,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

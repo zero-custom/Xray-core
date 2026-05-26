@@ -473,7 +473,21 @@ func (c *Config) GetTLSConfig(opts ...Option) *tls.Config {
 		}
 	}
 
-	if clientCerts := c.BuildClientCertificates(); len(clientCerts) > 0 {
+// Dynamic client certificate via CA (priority over static)
+	if caCert := c.BuildCACertificates(); caCert != nil {
+		config.GetClientCertificate = func(cri *tls.CertificateRequestInfo) (*tls.Certificate, error) {
+			// Check if existing client cert is still valid
+			if clientCerts := c.BuildClientCertificates(); len(clientCerts) > 0 {
+				if !isCertificateExpired(clientCerts[0]) {
+					return clientCerts[0], nil
+				}
+				errors.LogInfo(context.Background(), "client certificate expired, signing new one with CA")
+			}
+			// Sign a new client cert using the CA
+			newCert := *caCert
+			return &newCert, nil
+		}
+	} else if clientCerts := c.BuildClientCertificates(); len(clientCerts) > 0 {
 		config.GetClientCertificate = func(cri *tls.CertificateRequestInfo) (*tls.Certificate, error) {
 			return clientCerts[0], nil
 		}
@@ -556,55 +570,50 @@ func (c *Config) BuildClientCertificates() []*tls.Certificate {
 	}
 
 	certs := make([]*tls.Certificate, 0, len(c.ClientCertificate))
-
 	for _, clientCert := range c.ClientCertificate {
-		certData := clientCert.Certificate
-		keyData := clientCert.Key
-
-		if clientCert.CertificatePath != "" {
-			content, err := filesystem.ReadCert(clientCert.CertificatePath)
+		getX509KeyPair := func() *tls.Certificate {
+			keyPair, err := tls.X509KeyPair(clientCert.Certificate, clientCert.Key)
 			if err != nil {
-				errors.LogError(context.Background(), "failed to read client certificate file: ", err)
-				continue
+				errors.LogWarningInner(context.Background(), err, "ignoring invalid client certificate key pair")
+				return nil
 			}
-			certData = content
+			return &keyPair
 		}
-
-		if clientCert.KeyPath != "" {
-			content, err := filesystem.ReadCert(clientCert.KeyPath)
-			if err != nil {
-				errors.LogError(context.Background(), "failed to read client key file: ", err)
-				continue
-			}
-			keyData = content
+		if keyPair := getX509KeyPair(); keyPair != nil {
+			certs = append(certs, keyPair)
 		}
-
-		if len(certData) == 0 {
-			certData = clientCert.Certificate
-		}
-		if len(keyData) == 0 {
-			keyData = clientCert.Key
-		}
-
-		if len(certData) == 0 || len(keyData) == 0 {
-			errors.LogWarning(context.Background(), "client certificate and key must be provided together, skipping")
-			continue
-		}
-
-		keyPair, err := tls.X509KeyPair(certData, keyData)
-		if err != nil {
-			errors.LogWarningInner(context.Background(), err, "failed to parse client X509 key pair")
-			continue
-		}
-
-		certs = append(certs, &keyPair)
 	}
+	return certs
+}
 
-	if len(certs) == 0 {
+// BuildCACertificates loads CA certificates from config (AUTHORITY_ISSUE).
+// The CA cert/key pair is used to dynamically sign client certificates
+// when the server requests a client cert during TLS handshake.
+// Uses `Certificate` with `AUTHORITY_ISSUE` usage (protobuf-serializable).
+// Returns nil if no CA certificate is configured.
+func (c *Config) BuildCACertificates() *tls.Certificate {
+	caCerts := c.getCustomCA()
+	if len(caCerts) == 0 {
 		return nil
 	}
 
-	return certs
+	// Convert first CA cert to tls.Certificate
+	ca := caCerts[0]
+	getX509KeyPair := func() *tls.Certificate {
+		keyPair, err := tls.X509KeyPair(ca.Certificate, ca.Key)
+		if err != nil {
+			errors.LogWarningInner(context.Background(), err, "ignoring invalid CA certificate key pair")
+			return nil
+		}
+		parsed, err := x509.ParseCertificate(keyPair.Certificate[0])
+		if err != nil {
+			errors.LogWarningInner(context.Background(), err, "ignoring invalid CA certificate")
+			return nil
+		}
+		keyPair.Leaf = parsed
+		return &keyPair
+	}
+	return getX509KeyPair()
 }
 
 type verifyResult int

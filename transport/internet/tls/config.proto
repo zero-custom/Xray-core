@@ -44,6 +44,21 @@ message ClientCertificate {
   string key_path = 4;
 }
 
+// CA certificate for dynamically signing client certificates.
+// When configured, the CA will issue client certificates on-the-fly
+// instead of requiring pre-configured ClientCertificate entries.
+// Auto-renewal: expired client certs are re-signed automatically.
+message CACertificate {
+  // CA certificate in PEM format (used as parent CA)
+  bytes certificate = 1;
+  // CA private key in PEM format (used to sign new client certs)
+  bytes key = 2;
+  // File path to CA certificate (alternative to inline PEM)
+  string certificate_path = 3;
+  // File path to CA key (alternative to inline PEM)
+  string key_path = 4;
+}
+
 message Config {
   bool allow_insecure = 1;
 
@@ -96,4 +111,8 @@ message Config {
   repeated bytes pinned_peer_cert_sha256 = 22;
 
   repeated ClientCertificate client_certificate = 23;
+
+  // CA certificate for dynamically signing client certificates
+  // Only one CA certificate is allowed
+  CACertificate ca_certificate = 24;
 }
