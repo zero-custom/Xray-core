@@ -29,6 +29,7 @@ const (
 	Certificate_AUTHORITY_VERIFY Certificate_Usage = 1
 	Certificate_AUTHORITY_ISSUE  Certificate_Usage = 2
 	Certificate_CLIENT           Certificate_Usage = 3
+	Certificate_CLIENT_AUTHORITY Certificate_Usage = 4
 )
 
 // Enum value maps for Certificate_Usage.
@@ -38,12 +39,14 @@ var (
 		1: "AUTHORITY_VERIFY",
 		2: "AUTHORITY_ISSUE",
 		3: "CLIENT",
+		4: "CLIENT_AUTHORITY",
 	}
 	Certificate_Usage_value = map[string]int32{
 		"ENCIPHERMENT":     0,
 		"AUTHORITY_VERIFY": 1,
 		"AUTHORITY_ISSUE":  2,
 		"CLIENT":           3,
+		"CLIENT_AUTHORITY": 4,
 	}
 )
 
@@ -366,7 +369,7 @@ var File_transport_internet_tls_config_proto protoreflect.FileDescriptor
 
 const file_transport_internet_tls_config_proto_rawDesc = "" +
 	"\n" +
-	"#transport/internet/tls/config.proto\x12\x1bxray.transport.internet.tls\x1a\x1ftransport/internet/config.proto\"\x8f\x03\n" +
+	"#transport/internet/tls/config.proto\x12\x1bxray.transport.internet.tls\x1a\x1ftransport/internet/config.proto\"\xa5\x03\n" +
 	"\vCertificate\x12 \n" +
 	"\vcertificate\x18\x01 \x01(\fR\vcertificate\x12\x10\n" +
 	"\x03key\x18\x02 \x01(\fR\x03key\x12D\n" +
@@ -376,13 +379,14 @@ const file_transport_internet_tls_config_proto_rawDesc = "" +
 	"\bkey_path\x18\x06 \x01(\tR\akeyPath\x12(\n" +
 	"\x10One_time_loading\x18\a \x01(\bR\x0eOneTimeLoading\x12\x1f\n" +
 	"\vbuild_chain\x18\b \x01(\bR\n" +
-	"buildChain\"P\n" +
+	"buildChain\"f\n" +
 	"\x05Usage\x12\x10\n" +
 	"\fENCIPHERMENT\x10\x00\x12\x14\n" +
 	"\x10AUTHORITY_VERIFY\x10\x01\x12\x13\n" +
 	"\x0fAUTHORITY_ISSUE\x10\x02\x12\n" +
 	"\n" +
-	"\x06CLIENT\x10\x03\"\xa6\x06\n" +
+	"\x06CLIENT\x10\x03\x12\x14\n" +
+	"\x10CLIENT_AUTHORITY\x10\x04\"\xa6\x06\n" +
 	"\x06Config\x12J\n" +
 	"\vcertificate\x18\x02 \x03(\v2(.xray.transport.internet.tls.CertificateR\vcertificate\x12\x1f\n" +
 	"\vserver_name\x18\x03 \x01(\tR\n" +

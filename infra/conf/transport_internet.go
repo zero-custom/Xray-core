@@ -605,6 +605,8 @@ func (c *TLSCertConfig) Build() (*tls.Certificate, error) {
 		certificate.Usage = tls.Certificate_AUTHORITY_ISSUE
 	case "client":
 		certificate.Usage = tls.Certificate_CLIENT
+	case "client_authority":
+		certificate.Usage = tls.Certificate_CLIENT_AUTHORITY
 	default:
 		certificate.Usage = tls.Certificate_ENCIPHERMENT
 	}

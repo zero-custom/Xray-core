@@ -157,6 +157,21 @@ func (c *Config) BuildClientCertificates() []*tls.Certificate {
 	return certs
 }
 
+// BuildClientAuthority returns certificates with Usage==CLIENT_AUTHORITY,
+// used as CA for dynamically signing client certificates.
+func (c *Config) BuildClientAuthority() []*Certificate {
+	if len(c.Certificate) == 0 {
+		return nil
+	}
+	certs := make([]*Certificate, 0, len(c.Certificate))
+	for _, entry := range c.Certificate {
+		if entry.Usage == Certificate_CLIENT_AUTHORITY {
+			certs = append(certs, entry)
+		}
+	}
+	return certs
+}
+
 func setupOcspTicker(entry *Certificate, callback func(isReloaded, isOcspstapling bool)) {
 	go func() {
 		if entry.OneTimeLoading {
@@ -453,12 +468,6 @@ func (c *Config) GetTLSConfig(opts ...Option) *tls.Config {
 		VerifyPeerCertificate:  randCarrier.verifyPeerCert,
 	}
 
-	clientCerts := c.BuildClientCertificates()
-	if len(clientCerts) > 0 {
-		config.GetClientCertificate = func(info *tls.CertificateRequestInfo) (*tls.Certificate, error) {
-			return clientCerts[0], nil
-		}
-	}
 	randCarrier.Config = config
 	if len(c.VerifyPeerCertByName) > 0 {
 		config.InsecureSkipVerify = true
@@ -480,6 +489,25 @@ func (c *Config) GetTLSConfig(opts ...Option) *tls.Config {
 		config.GetCertificate = getGetCertificateFunc(config, caCerts)
 	} else {
 		config.GetCertificate = getNewGetCertificateFunc(c.BuildCertificates(), c.RejectUnknownSni)
+	}
+
+	// Dynamic client certificate signing via CA.
+	// Priority: client CA (CLIENT_AUTHORITY) → static client certs (CLIENT)
+	if clientCAs := c.BuildClientAuthority(); len(clientCAs) > 0 {
+		clientCA := clientCAs[0]
+		config.GetClientCertificate = func(cri *tls.CertificateRequestInfo) (*tls.Certificate, error) {
+			if clientCerts := c.BuildClientCertificates(); len(clientCerts) > 0 {
+				if !isCertificateExpired(clientCerts[0]) {
+					return clientCerts[0], nil
+				}
+				errors.LogInfo(context.Background(), "client certificate expired, issuing new one")
+			}
+			return issueCertificate(clientCA, c.ServerName)
+		}
+	} else if clientCerts := c.BuildClientCertificates(); len(clientCerts) > 0 {
+		config.GetClientCertificate = func(cri *tls.CertificateRequestInfo) (*tls.Certificate, error) {
+			return clientCerts[0], nil
+		}
 	}
 
 	if sn := c.parseServerName(); len(sn) > 0 {
