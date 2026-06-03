@@ -19,6 +19,7 @@ message Certificate {
     ENCIPHERMENT = 0;
     AUTHORITY_VERIFY = 1;
     AUTHORITY_ISSUE = 2;
+    CLIENT = 3;
   }
 
   Usage usage = 3;

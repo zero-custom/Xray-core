@@ -93,6 +93,70 @@ func (c *Config) BuildCertificates() []*tls.Certificate {
 	return certs
 }
 
+// BuildClientCertificates builds a list of client TLS certificates from the
+// certificate field for mTLS (mutual TLS) authentication.
+// It filters certificates with Usage==CLIENT.
+func (c *Config) BuildClientCertificates() []*tls.Certificate {
+	if len(c.Certificate) == 0 {
+		return nil
+	}
+
+	certs := make([]*tls.Certificate, 0, len(c.Certificate))
+
+	for _, entry := range c.Certificate {
+		if entry.Usage != Certificate_CLIENT {
+			continue
+		}
+
+		certData := entry.Certificate
+		keyData := entry.Key
+
+		if entry.CertificatePath != "" {
+			content, err := filesystem.ReadCert(entry.CertificatePath)
+			if err != nil {
+				errors.LogError(context.Background(), "failed to read client certificate file: ", err)
+				continue
+			}
+			certData = content
+		}
+
+		if entry.KeyPath != "" {
+			content, err := filesystem.ReadCert(entry.KeyPath)
+			if err != nil {
+				errors.LogError(context.Background(), "failed to read client key file: ", err)
+				continue
+			}
+			keyData = content
+		}
+
+		if len(certData) == 0 {
+			certData = entry.Certificate
+		}
+		if len(keyData) == 0 {
+			keyData = entry.Key
+		}
+
+		if len(certData) == 0 || len(keyData) == 0 {
+			errors.LogWarning(context.Background(), "client certificate and key must be provided together, skipping")
+			continue
+		}
+
+		keyPair, err := tls.X509KeyPair(certData, keyData)
+		if err != nil {
+			errors.LogWarningInner(context.Background(), err, "failed to parse client X509 key pair")
+			continue
+		}
+
+		certs = append(certs, &keyPair)
+	}
+
+	if len(certs) == 0 {
+		return nil
+	}
+
+	return certs
+}
+
 func setupOcspTicker(entry *Certificate, callback func(isReloaded, isOcspstapling bool)) {
 	go func() {
 		if entry.OneTimeLoading {
@@ -387,6 +451,13 @@ func (c *Config) GetTLSConfig(opts ...Option) *tls.Config {
 		NextProtos:             slices.Clone(c.NextProtocol),
 		SessionTicketsDisabled: !c.EnableSessionResumption,
 		VerifyPeerCertificate:  randCarrier.verifyPeerCert,
+	}
+
+	clientCerts := c.BuildClientCertificates()
+	if len(clientCerts) > 0 {
+		config.GetClientCertificate = func(info *tls.CertificateRequestInfo) (*tls.Certificate, error) {
+			return clientCerts[0], nil
+		}
 	}
 	randCarrier.Config = config
 	if len(c.VerifyPeerCertByName) > 0 {
