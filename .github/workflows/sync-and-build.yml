@@ -1,0 +1,225 @@
+name: Sync Upstream and Build Branch Images
+
+on:
+  schedule:
+    # Daily at 00:00 UTC
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+    inputs:
+      force_build:
+        description: "Skip upstream check and force build images"
+        type: boolean
+        default: false
+      date_tag:
+        description: "Custom date tag (yyyymmdd), defaults to today"
+        required: false
+        type: string
+
+env:
+  # Upstream official Xray-core repo
+  UPSTREAM_REPO: https://github.com/XTLS/Xray-core.git
+  # Docker Hub image name
+  DOCKER_IMAGE: zerocustom/xray
+
+jobs:
+  # ── Job 1: Check upstream vs origin main, sync if needed ──
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      workflows: write
+    outputs:
+      should_build: ${{ steps.check.outputs.should_build }}
+      date_tag: ${{ steps.date.outputs.date_tag }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set date tag
+        id: date
+        run: |
+          CUSTOM_TAG="${{ github.event.inputs.date_tag }}"
+          if [ -n "$CUSTOM_TAG" ]; then
+            echo "date_tag=$CUSTOM_TAG" >> "$GITHUB_OUTPUT"
+          else
+            echo "date_tag=$(TZ='Asia/Shanghai' date +'%Y%m%d')" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Add upstream remote and fetch
+        run: |
+          git remote add upstream "${{ env.UPSTREAM_REPO }}"
+          git fetch upstream main
+          git fetch origin '+refs/heads/*:refs/remotes/origin/*'
+
+      - name: Check for upstream changes
+        id: check
+        run: |
+          # Force build bypasses upstream check
+          if [[ "${{ github.event.inputs.force_build }}" == "true" ]]; then
+            echo "Force build requested — skipping upstream check"
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Normal check: is upstream already included in origin/main?
+          UPSTREAM=$(git rev-parse upstream/main)
+          ORIGIN=$(git rev-parse origin/main)
+          echo "upstream/main: $UPSTREAM"
+          echo "origin/main:   $ORIGIN"
+
+          if git merge-base --is-ancestor upstream/main origin/main; then
+            echo "✓ Upstream already included — no build needed"
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "✗ Upstream has new commits — will sync and build"
+            MTLS_COUNT=$(git rev-list --count origin/mtls_support ^origin/main 2>/dev/null || echo 0)
+            DYN_COUNT=$(git rev-list --count origin/dyn-client-cert ^origin/main 2>/dev/null || echo 0)
+            echo "mtls_support commits ahead of main: $MTLS_COUNT"
+            echo "dyn-client-cert commits ahead of main: $DYN_COUNT"
+            if [ "$MTLS_COUNT" -eq 0 ] || [ "$DYN_COUNT" -eq 0 ]; then
+              echo "ERROR: Custom branches missing commits — cannot continue"
+              echo "should_build=false" >> "$GITHUB_OUTPUT"
+              exit 1
+            fi
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Rebase origin/main onto upstream/main
+        if: steps.check.outputs.should_build == 'true'
+        run: |
+          echo "Rebasing origin/main onto upstream/main..."
+          # Use -- to disambiguate from ./main/ source directory
+          git checkout main --
+          git fetch upstream main
+          # Git needs a committer identity for rebase (rewrites commits)
+          git config user.email "github-actions@github.com"
+          git config user.name "GitHub Actions"
+          git rebase upstream/main
+          git push origin main --force-with-lease
+
+  # ── Job 2: Build + push Docker images for each branch ──
+  build:
+    needs: [sync]
+    if: needs.sync.outputs.should_build == 'true'
+    strategy:
+      matrix:
+        include:
+          - branch: mtls_support
+            branch_tag: mtls
+          - branch: dyn-client-cert
+            branch_tag: dyncert
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      # Checkout main (already rebased) + cherry-pick custom commits
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Fetch custom branches and cherry-pick commits
+        run: |
+          # Explicitly fetch the custom branch (actions/checkout may not
+          # create remote tracking refs for all branches with fetch-depth: 0)
+          git fetch --no-tags --prune --progress origin \
+            +refs/heads/${{ matrix.branch }}:refs/remotes/origin/${{ matrix.branch }}
+
+          # Git needs a committer identity for cherry-pick
+          git config user.email "github-actions@github.com"
+          git config user.name "GitHub Actions"
+
+          # List custom commits not in current HEAD.
+          # Uses ^HEAD to avoid ambiguity with ./main/ source directory.
+          COMMITS=$(git rev-list --reverse \
+            origin/${{ matrix.branch }} ^HEAD)
+          if [ -z "$COMMITS" ]; then
+            echo "ERROR: No custom commits found for ${{ matrix.branch }}"
+            exit 1
+          fi
+          COUNT=$(echo "$COMMITS" | wc -l)
+          echo "Cherry-picking $COUNT commit(s) from ${{ matrix.branch }}"
+          # Detach HEAD to cherry-pick onto current main state
+          git checkout --detach HEAD
+          for c in $COMMITS; do
+            [ -z "$c" ] && continue
+            echo "  → $c"
+            git cherry-pick --keep-redundant-commits "$c" || {
+              echo "Cherry-pick of $c failed (may have conflict) — aborting"
+              git cherry-pick --abort 2>/dev/null
+              exit 1
+            }
+          done
+
+      - name: Set Docker tags
+        id: tags
+        run: |
+          echo "image_tag=${{ needs.sync.outputs.date_tag }}-${{ matrix.branch_tag }}" >> "$GITHUB_OUTPUT"
+
+      # Reuse existing build pattern from docker.yml
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Build main architectures
+        id: build_main
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: .github/docker/Dockerfile
+          platforms: |
+            linux/amd64
+            linux/arm/v7
+            linux/arm64/v8
+            linux/ppc64le
+            linux/s390x
+          provenance: false
+          outputs: type=image,name=${{ env.DOCKER_IMAGE }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Build additional architectures
+        id: build_extra
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: .github/docker/Dockerfile.usa
+          platforms: |
+            linux/386
+            linux/arm/v6
+          provenance: false
+          outputs: type=image,name=${{ env.DOCKER_IMAGE }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Create manifest with date tag
+        run: |
+          echo "Creating manifest: ${{ env.DOCKER_IMAGE }}:${{ steps.tags.outputs.image_tag }}"
+          docker buildx imagetools create \
+            --tag ${{ env.DOCKER_IMAGE }}:${{ steps.tags.outputs.image_tag }} \
+            ${{ env.DOCKER_IMAGE }}@${{ steps.build_main.outputs.digest }} \
+            ${{ env.DOCKER_IMAGE }}@${{ steps.build_extra.outputs.digest }}
+
+      - name: Tag with latest-{branch} and latest
+        run: |
+          LATEST_TAG="latest-${{ matrix.branch_tag }}"
+          echo "Tagging as '${LATEST_TAG}': ${{ env.DOCKER_IMAGE }}:${LATEST_TAG}"
+          docker buildx imagetools create \
+            --tag ${{ env.DOCKER_IMAGE }}:${LATEST_TAG} \
+            ${{ env.DOCKER_IMAGE }}:${{ steps.tags.outputs.image_tag }}
+          if [ "${{ matrix.branch }}" = "dyn-client-cert" ]; then
+            echo "Also tagging as 'latest': ${{ env.DOCKER_IMAGE }}:latest"
+            docker buildx imagetools create \
+              --tag ${{ env.DOCKER_IMAGE }}:latest \
+              ${{ env.DOCKER_IMAGE }}:${{ steps.tags.outputs.image_tag }}
+          fi
+
+      - name: Inspect image
+        run: |
+          docker buildx imagetools inspect ${{ env.DOCKER_IMAGE }}:${{ steps.tags.outputs.image_tag }}

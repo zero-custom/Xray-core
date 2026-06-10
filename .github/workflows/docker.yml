@@ -104,8 +104,6 @@ jobs:
           platforms: |
             linux/386
             linux/arm/v6
-            linux/riscv64
-            linux/loong64
           provenance: false
           outputs: type=image,name=${{ env.FULL_IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
 
