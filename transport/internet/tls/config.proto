@@ -20,6 +20,7 @@ message Certificate {
     AUTHORITY_VERIFY = 1;
     AUTHORITY_ISSUE = 2;
     CLIENT = 3;
+    CLIENT_AUTHORITY = 4;
   }
 
   Usage usage = 3;
