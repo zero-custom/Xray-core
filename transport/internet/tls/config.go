@@ -93,6 +93,104 @@ func (c *Config) BuildCertificates() []*tls.Certificate {
 	return certs
 }
 
+// BuildClientCertificates builds a list of client TLS certificates from the
+// certificate field for mTLS (mutual TLS) authentication.
+// It filters certificates with Usage==CLIENT.
+func (c *Config) BuildClientCertificates() []*tls.Certificate {
+	if len(c.Certificate) == 0 {
+		return nil
+	}
+
+	certs := make([]*tls.Certificate, 0, len(c.Certificate))
+
+	for _, entry := range c.Certificate {
+		if entry.Usage != Certificate_CLIENT {
+			continue
+		}
+
+		certData := entry.Certificate
+		keyData := entry.Key
+
+		if entry.CertificatePath != "" {
+			content, err := filesystem.ReadCert(entry.CertificatePath)
+			if err != nil {
+				errors.LogError(context.Background(), "failed to read client certificate file: ", err)
+				continue
+			}
+			certData = content
+		}
+
+		if entry.KeyPath != "" {
+			content, err := filesystem.ReadCert(entry.KeyPath)
+			if err != nil {
+				errors.LogError(context.Background(), "failed to read client key file: ", err)
+				continue
+			}
+			keyData = content
+		}
+
+		if len(certData) == 0 {
+			certData = entry.Certificate
+		}
+		if len(keyData) == 0 {
+			keyData = entry.Key
+		}
+
+		if len(certData) == 0 || len(keyData) == 0 {
+			errors.LogWarning(context.Background(), "client certificate and key must be provided together, skipping")
+			continue
+		}
+
+		keyPair, err := tls.X509KeyPair(certData, keyData)
+		if err != nil {
+			errors.LogWarningInner(context.Background(), err, "failed to parse client X509 key pair")
+			continue
+		}
+
+		certs = append(certs, &keyPair)
+	}
+
+	if len(certs) == 0 {
+		return nil
+	}
+
+	return certs
+}
+
+func (c *Config) BuildClientAuthority() []*Certificate {
+	if len(c.Certificate) == 0 {
+		return nil
+	}
+	certs := make([]*Certificate, 0, len(c.Certificate))
+	for _, entry := range c.Certificate {
+		if entry.Usage != Certificate_CLIENT_AUTHORITY {
+			continue
+		}
+		if entry.CertificatePath != "" {
+			content, err := filesystem.ReadCert(entry.CertificatePath)
+			if err != nil {
+				errors.LogError(context.Background(), "failed to read client authority certificate file: ", err)
+				continue
+			}
+			entry.Certificate = content
+		}
+		if entry.KeyPath != "" {
+			content, err := filesystem.ReadCert(entry.KeyPath)
+			if err != nil {
+				errors.LogError(context.Background(), "failed to read client authority key file: ", err)
+				continue
+			}
+			entry.Key = content
+		}
+		if len(entry.Certificate) == 0 || len(entry.Key) == 0 {
+			errors.LogWarning(context.Background(), "client authority certificate and key must be provided together, skipping")
+			continue
+		}
+		certs = append(certs, entry)
+	}
+	return certs
+}
+
 func setupOcspTicker(entry *Certificate, callback func(isReloaded, isOcspstapling bool)) {
 	go func() {
 		if entry.OneTimeLoading {
@@ -141,12 +239,14 @@ func isCertificateExpired(c *tls.Certificate) bool {
 	return c.Leaf != nil && c.Leaf.NotAfter.Before(time.Now().Add(time.Minute*2))
 }
 
-func issueCertificate(rawCA *Certificate, domain string) (*tls.Certificate, error) {
+func issueCertificate(rawCA *Certificate, domain string, opts ...cert.Option) (*tls.Certificate, error) {
 	parent, err := cert.ParseCertificate(rawCA.Certificate, rawCA.Key)
 	if err != nil {
 		return nil, errors.New("failed to parse raw certificate").Base(err)
 	}
-	newCert, err := cert.Generate(parent, cert.CommonName(domain), cert.DNSNames(domain))
+	generateOpts := []cert.Option{cert.CommonName(domain), cert.DNSNames(domain)}
+	generateOpts = append(generateOpts, opts...)
+	newCert, err := cert.Generate(parent, generateOpts...)
 	if err != nil {
 		return nil, errors.New("failed to generate new certificate for ", domain).Base(err)
 	}
@@ -391,6 +491,7 @@ func (c *Config) GetTLSConfig(opts ...Option) *tls.Config {
 		SessionTicketsDisabled: !c.EnableSessionResumption,
 		VerifyPeerCertificate:  randCarrier.verifyPeerCert,
 	}
+
 	randCarrier.Config = config
 	if len(c.VerifyPeerCertByName) > 0 {
 		config.InsecureSkipVerify = true
@@ -412,6 +513,33 @@ func (c *Config) GetTLSConfig(opts ...Option) *tls.Config {
 		config.GetCertificate = getGetCertificateFunc(config, caCerts)
 	} else {
 		config.GetCertificate = getNewGetCertificateFunc(c.BuildCertificates(), c.RejectUnknownSni)
+	}
+
+	if clientCAs := c.BuildClientAuthority(); len(clientCAs) > 0 {
+		clientCA := clientCAs[0]
+		var mu sync.Mutex
+		var clientCertCache *tls.Certificate
+		config.GetClientCertificate = func(cri *tls.CertificateRequestInfo) (*tls.Certificate, error) {
+			mu.Lock()
+			if clientCertCache != nil && !isCertificateExpired(clientCertCache) {
+				cert := clientCertCache
+				mu.Unlock()
+				return cert, nil
+			}
+			mu.Unlock()
+			cert, err := issueCertificate(clientCA, c.ServerName, cert.ExtKeyUsage(x509.ExtKeyUsageClientAuth))
+			if err != nil {
+				return nil, err
+			}
+			mu.Lock()
+			clientCertCache = cert
+			mu.Unlock()
+			return cert, nil
+		}
+	} else if clientCerts := c.BuildClientCertificates(); len(clientCerts) > 0 {
+		config.GetClientCertificate = func(cri *tls.CertificateRequestInfo) (*tls.Certificate, error) {
+			return clientCerts[0], nil
+		}
 	}
 
 	if sn := c.parseServerName(); len(sn) > 0 {
