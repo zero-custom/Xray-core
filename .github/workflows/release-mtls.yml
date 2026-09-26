@@ -1,0 +1,175 @@
+# Fork: version pipeline — detect new upstream tags, then per tag:
+# prepare version branch → build Go binaries → build+push mTLS images → publish Release.
+#
+# Runs daily (01:00 UTC, off-peak from the 00:00 sync) and on manual dispatch.
+# First run with no new tags exits green with everything skipped.
+# Only this file is fork-owned here; upstream workflows are untouched.
+
+name: Release mTLS version
+
+on:
+  schedule:
+    # Daily at 01:00 UTC (sync runs at 00:00, stay off-peak)
+    - cron: '0 1 * * *'
+  workflow_dispatch:
+    inputs:
+      manual_tag:
+        description: 'Only process this upstream tag (e.g. v26.9.10)'
+        type: string
+        required: false
+      force:
+        description: 'Rebuild even if <tag>-mtls.N already released'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  issues: write
+
+env:
+  # Pin every `gh` call in our scripts to the fork. Without this, gh may
+  # resolve the repo from git remotes and hit upstream (observed: publish
+  # step POSTed to XTLS/Xray-core/releases → 403). Never point at upstream.
+  GH_REPO: zero-custom/Xray-core
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      pending_tags: ${{ steps.detect.outputs.pending_tags }}
+      has_pending: ${{ steps.detect.outputs.has_pending }}
+      tags: ${{ steps.matrix.outputs.tags }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 1
+
+      - id: detect
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          MANUAL_TAG="${{ inputs.manual_tag }}" FORCE="${{ inputs.force }}" BASELINE_TAG=v26.9.9 sh .github/scripts/detect-new-tags.sh
+
+      - id: matrix
+        run: |
+          TAGS_JSON="$(echo "${{ steps.detect.outputs.pending_tags }}" | jq -R -c 'split(" ") | map(select(length > 0))')"
+          echo "pending as JSON: $TAGS_JSON"
+          echo "tags=$TAGS_JSON" >> "$GITHUB_OUTPUT"
+
+  release:
+    needs: detect
+    if: needs.detect.outputs.has_pending == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        tag: ${{ fromJSON(needs.detect.outputs.tags) }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Preflight Docker Hub secrets
+        env:
+          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+          DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+        run: |
+          if [ -z "$DOCKER_USERNAME" ] || [ -z "$DOCKER_PASSWORD" ]; then
+            echo "::error::Missing Docker Hub credentials: set DOCKER_USERNAME and DOCKER_PASSWORD secrets, then re-run."
+            exit 1
+          fi
+
+      - id: prep
+        name: Prepare version branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git remote add upstream https://github.com/XTLS/Xray-core.git 2>/dev/null || true
+          set +e
+          PREV_BRANCH= sh .github/scripts/prepare-branch.sh "${{ matrix.tag }}"
+          rc=$?
+          set -e
+          if [ "$rc" -eq 2 ]; then
+            echo "prepare-branch.sh filed a conflict issue; skipping ${{ matrix.tag }} gracefully."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$rc" -ne 0 ]; then
+            echo "prepare-branch.sh failed with exit $rc" >&2
+            exit "$rc"
+          fi
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      - name: Check out version branch worktree
+        if: steps.prep.outputs.skip != 'true'
+        run: |
+          git worktree add /tmp/vb "refs/heads/${{ matrix.tag }}"
+          git -C /tmp/vb rev-parse HEAD
+          # prepare-branch.sh leaves this checkout on the version branch;
+          # switch back so go.mod / dockerfiles below come from main.
+          git checkout main
+
+      - name: Set up Go
+        if: steps.prep.outputs.skip != 'true'
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Build binaries
+        if: steps.prep.outputs.skip != 'true'
+        run: |
+          set -eu
+          TAG="${{ matrix.tag }}"
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          rm -rf /tmp/pkgstage && mkdir -p /tmp/pkgstage
+          cd /tmp/vb
+          for target in "linux amd64" "linux arm64" "windows amd64" "darwin arm64"; do
+            set -- $target
+            GOOS=$1 GOARCH=$2
+            BIN=xray
+            if [ "$GOOS" = "windows" ]; then BIN=xray.exe; fi
+            echo "==> building $GOOS/$GOARCH"
+            GOOS="$GOOS" GOARCH="$GOARCH" CGO_ENABLED=0 go build -o "$BIN" -trimpath -buildvcs=false ./main
+            ZIP="$GITHUB_WORKSPACE/dist/Xray-$TAG-mtls-$GOOS-$GOARCH.zip"
+            cp README.md LICENSE "$BIN" /tmp/pkgstage/
+            (cd /tmp/pkgstage && rm -f "$ZIP" && zip -9 "$ZIP" README.md LICENSE "$BIN" && rm -f "$BIN")
+          done
+          rm -rf /tmp/pkgstage
+          (cd "$GITHUB_WORKSPACE/dist" && sha256sum ./*.zip > sha256sums.txt && cat sha256sums.txt)
+
+      - name: Log in to Docker Hub
+        if: steps.prep.outputs.skip != 'true'
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Set up QEMU
+        if: steps.prep.outputs.skip != 'true'
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        if: steps.prep.outputs.skip != 'true'
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build and push image (all architectures)
+        if: steps.prep.outputs.skip != 'true'
+        uses: docker/build-push-action@v7
+        with:
+          context: /tmp/vb
+          file: ${{ github.workspace }}/docker/mtls.Dockerfile
+          platforms: linux/amd64,linux/arm64,linux/386,linux/arm/v6,linux/arm/v7,linux/ppc64le,linux/s390x
+          provenance: false
+          push: true
+          tags: |
+            zerocustom/xray:${{ matrix.tag }}-mtls
+            zerocustom/xray:latest-mtls
+            zerocustom/xray:latest
+
+      - name: Publish GitHub Release
+        if: steps.prep.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ARTIFACTS="$(echo dist/*.zip dist/sha256sums.txt)" sh .github/scripts/publish-release.sh "${{ matrix.tag }}"
