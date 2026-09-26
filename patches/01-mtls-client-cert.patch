@@ -1,0 +1,298 @@
+diff --git a/common/protocol/tls/cert/cert.go b/common/protocol/tls/cert/cert.go
+index 0a581e0..6d92e39 100644
+--- a/common/protocol/tls/cert/cert.go
++++ b/common/protocol/tls/cert/cert.go
+@@ -82,6 +82,12 @@ func KeyUsage(usage x509.KeyUsage) Option {
+ 	}
+ }
+ 
++func ExtKeyUsage(usage ...x509.ExtKeyUsage) Option {
++	return func(c *x509.Certificate) {
++		c.ExtKeyUsage = usage
++	}
++}
++
+ func Organization(org string) Option {
+ 	return func(c *x509.Certificate) {
+ 		c.Subject.Organization = []string{org}
+diff --git a/infra/conf/transport_security.go b/infra/conf/transport_security.go
+index b5cd7d2..dea881c 100644
+--- a/infra/conf/transport_security.go
++++ b/infra/conf/transport_security.go
+@@ -283,6 +283,10 @@ func (c *TLSCertConfig) Build() (*tls.Certificate, error) {
+ 		certificate.Usage = tls.Certificate_AUTHORITY_VERIFY
+ 	case "issue":
+ 		certificate.Usage = tls.Certificate_AUTHORITY_ISSUE
++	case "client":
++		certificate.Usage = tls.Certificate_CLIENT
++	case "client_authority":
++		certificate.Usage = tls.Certificate_CLIENT_AUTHORITY
+ 	default:
+ 		certificate.Usage = tls.Certificate_ENCIPHERMENT
+ 	}
+diff --git a/transport/internet/tls/config.go b/transport/internet/tls/config.go
+index 9038cd2..bd89da8 100644
+--- a/transport/internet/tls/config.go
++++ b/transport/internet/tls/config.go
+@@ -93,6 +93,104 @@ func (c *Config) BuildCertificates() []*tls.Certificate {
+ 	return certs
+ }
+ 
++// BuildClientCertificates builds a list of client TLS certificates from the
++// certificate field for mTLS (mutual TLS) authentication.
++// It filters certificates with Usage==CLIENT.
++func (c *Config) BuildClientCertificates() []*tls.Certificate {
++	if len(c.Certificate) == 0 {
++		return nil
++	}
++
++	certs := make([]*tls.Certificate, 0, len(c.Certificate))
++
++	for _, entry := range c.Certificate {
++		if entry.Usage != Certificate_CLIENT {
++			continue
++		}
++
++		certData := entry.Certificate
++		keyData := entry.Key
++
++		if entry.CertificatePath != "" {
++			content, err := filesystem.ReadCert(entry.CertificatePath)
++			if err != nil {
++				errors.LogError(context.Background(), "failed to read client certificate file: ", err)
++				continue
++			}
++			certData = content
++		}
++
++		if entry.KeyPath != "" {
++			content, err := filesystem.ReadCert(entry.KeyPath)
++			if err != nil {
++				errors.LogError(context.Background(), "failed to read client key file: ", err)
++				continue
++			}
++			keyData = content
++		}
++
++		if len(certData) == 0 {
++			certData = entry.Certificate
++		}
++		if len(keyData) == 0 {
++			keyData = entry.Key
++		}
++
++		if len(certData) == 0 || len(keyData) == 0 {
++			errors.LogWarning(context.Background(), "client certificate and key must be provided together, skipping")
++			continue
++		}
++
++		keyPair, err := tls.X509KeyPair(certData, keyData)
++		if err != nil {
++			errors.LogWarningInner(context.Background(), err, "failed to parse client X509 key pair")
++			continue
++		}
++
++		certs = append(certs, &keyPair)
++	}
++
++	if len(certs) == 0 {
++		return nil
++	}
++
++	return certs
++}
++
++func (c *Config) BuildClientAuthority() []*Certificate {
++	if len(c.Certificate) == 0 {
++		return nil
++	}
++	certs := make([]*Certificate, 0, len(c.Certificate))
++	for _, entry := range c.Certificate {
++		if entry.Usage != Certificate_CLIENT_AUTHORITY {
++			continue
++		}
++		if entry.CertificatePath != "" {
++			content, err := filesystem.ReadCert(entry.CertificatePath)
++			if err != nil {
++				errors.LogError(context.Background(), "failed to read client authority certificate file: ", err)
++				continue
++			}
++			entry.Certificate = content
++		}
++		if entry.KeyPath != "" {
++			content, err := filesystem.ReadCert(entry.KeyPath)
++			if err != nil {
++				errors.LogError(context.Background(), "failed to read client authority key file: ", err)
++				continue
++			}
++			entry.Key = content
++		}
++		if len(entry.Certificate) == 0 || len(entry.Key) == 0 {
++			errors.LogWarning(context.Background(), "client authority certificate and key must be provided together, skipping")
++			continue
++		}
++		certs = append(certs, entry)
++	}
++	return certs
++}
++
+ func setupOcspTicker(entry *Certificate, callback func(isReloaded, isOcspstapling bool)) {
+ 	go func() {
+ 		if entry.OneTimeLoading {
+@@ -141,12 +239,14 @@ func isCertificateExpired(c *tls.Certificate) bool {
+ 	return c.Leaf != nil && c.Leaf.NotAfter.Before(time.Now().Add(time.Minute*2))
+ }
+ 
+-func issueCertificate(rawCA *Certificate, domain string) (*tls.Certificate, error) {
++func issueCertificate(rawCA *Certificate, domain string, opts ...cert.Option) (*tls.Certificate, error) {
+ 	parent, err := cert.ParseCertificate(rawCA.Certificate, rawCA.Key)
+ 	if err != nil {
+ 		return nil, errors.New("failed to parse raw certificate").Base(err)
+ 	}
+-	newCert, err := cert.Generate(parent, cert.CommonName(domain), cert.DNSNames(domain))
++	generateOpts := []cert.Option{cert.CommonName(domain), cert.DNSNames(domain)}
++	generateOpts = append(generateOpts, opts...)
++	newCert, err := cert.Generate(parent, generateOpts...)
+ 	if err != nil {
+ 		return nil, errors.New("failed to generate new certificate for ", domain).Base(err)
+ 	}
+@@ -391,6 +491,7 @@ func (c *Config) GetTLSConfig(opts ...Option) *tls.Config {
+ 		SessionTicketsDisabled: !c.EnableSessionResumption,
+ 		VerifyPeerCertificate:  randCarrier.verifyPeerCert,
+ 	}
++
+ 	randCarrier.Config = config
+ 	if len(c.VerifyPeerCertByName) > 0 {
+ 		config.InsecureSkipVerify = true
+@@ -414,6 +515,33 @@ func (c *Config) GetTLSConfig(opts ...Option) *tls.Config {
+ 		config.GetCertificate = getNewGetCertificateFunc(c.BuildCertificates(), c.RejectUnknownSni)
+ 	}
+ 
++	if clientCAs := c.BuildClientAuthority(); len(clientCAs) > 0 {
++		clientCA := clientCAs[0]
++		var mu sync.Mutex
++		var clientCertCache *tls.Certificate
++		config.GetClientCertificate = func(cri *tls.CertificateRequestInfo) (*tls.Certificate, error) {
++			mu.Lock()
++			if clientCertCache != nil && !isCertificateExpired(clientCertCache) {
++				cert := clientCertCache
++				mu.Unlock()
++				return cert, nil
++			}
++			mu.Unlock()
++			cert, err := issueCertificate(clientCA, c.ServerName, cert.ExtKeyUsage(x509.ExtKeyUsageClientAuth))
++			if err != nil {
++				return nil, err
++			}
++			mu.Lock()
++			clientCertCache = cert
++			mu.Unlock()
++			return cert, nil
++		}
++	} else if clientCerts := c.BuildClientCertificates(); len(clientCerts) > 0 {
++		config.GetClientCertificate = func(cri *tls.CertificateRequestInfo) (*tls.Certificate, error) {
++			return clientCerts[0], nil
++		}
++	}
++
+ 	if sn := c.parseServerName(); len(sn) > 0 {
+ 		config.ServerName = sn
+ 	}
+diff --git a/transport/internet/tls/config.pb.go b/transport/internet/tls/config.pb.go
+index b622d5a..f25b747 100644
+--- a/transport/internet/tls/config.pb.go
++++ b/transport/internet/tls/config.pb.go
+@@ -28,6 +28,8 @@ const (
+ 	Certificate_ENCIPHERMENT     Certificate_Usage = 0
+ 	Certificate_AUTHORITY_VERIFY Certificate_Usage = 1
+ 	Certificate_AUTHORITY_ISSUE  Certificate_Usage = 2
++	Certificate_CLIENT           Certificate_Usage = 3
++	Certificate_CLIENT_AUTHORITY Certificate_Usage = 4
+ )
+ 
+ // Enum value maps for Certificate_Usage.
+@@ -36,11 +38,15 @@ var (
+ 		0: "ENCIPHERMENT",
+ 		1: "AUTHORITY_VERIFY",
+ 		2: "AUTHORITY_ISSUE",
++		3: "CLIENT",
++		4: "CLIENT_AUTHORITY",
+ 	}
+ 	Certificate_Usage_value = map[string]int32{
+ 		"ENCIPHERMENT":     0,
+ 		"AUTHORITY_VERIFY": 1,
+ 		"AUTHORITY_ISSUE":  2,
++		"CLIENT":           3,
++		"CLIENT_AUTHORITY": 4,
+ 	}
+ )
+ 
+@@ -363,7 +369,7 @@ var File_transport_internet_tls_config_proto protoreflect.FileDescriptor
+ 
+ const file_transport_internet_tls_config_proto_rawDesc = "" +
+ 	"\n" +
+-	"#transport/internet/tls/config.proto\x12\x1bxray.transport.internet.tls\x1a\x1ftransport/internet/config.proto\"\x83\x03\n" +
++	"#transport/internet/tls/config.proto\x12\x1bxray.transport.internet.tls\x1a\x1ftransport/internet/config.proto\"\xa5\x03\n" +
+ 	"\vCertificate\x12 \n" +
+ 	"\vcertificate\x18\x01 \x01(\fR\vcertificate\x12\x10\n" +
+ 	"\x03key\x18\x02 \x01(\fR\x03key\x12D\n" +
+@@ -373,11 +379,14 @@ const file_transport_internet_tls_config_proto_rawDesc = "" +
+ 	"\bkey_path\x18\x06 \x01(\tR\akeyPath\x12(\n" +
+ 	"\x10One_time_loading\x18\a \x01(\bR\x0eOneTimeLoading\x12\x1f\n" +
+ 	"\vbuild_chain\x18\b \x01(\bR\n" +
+-	"buildChain\"D\n" +
++	"buildChain\"f\n" +
+ 	"\x05Usage\x12\x10\n" +
+ 	"\fENCIPHERMENT\x10\x00\x12\x14\n" +
+ 	"\x10AUTHORITY_VERIFY\x10\x01\x12\x13\n" +
+-	"\x0fAUTHORITY_ISSUE\x10\x02\"\xa6\x06\n" +
++	"\x0fAUTHORITY_ISSUE\x10\x02\x12\n" +
++	"\n" +
++	"\x06CLIENT\x10\x03\x12\x14\n" +
++	"\x10CLIENT_AUTHORITY\x10\x04\"\xa6\x06\n" +
+ 	"\x06Config\x12J\n" +
+ 	"\vcertificate\x18\x02 \x03(\v2(.xray.transport.internet.tls.CertificateR\vcertificate\x12\x1f\n" +
+ 	"\vserver_name\x18\x03 \x01(\tR\n" +
+diff --git a/transport/internet/tls/config.proto b/transport/internet/tls/config.proto
+index a05cc04..3f7643b 100644
+--- a/transport/internet/tls/config.proto
++++ b/transport/internet/tls/config.proto
+@@ -19,6 +19,8 @@ message Certificate {
+     ENCIPHERMENT = 0;
+     AUTHORITY_VERIFY = 1;
+     AUTHORITY_ISSUE = 2;
++    CLIENT = 3;
++    CLIENT_AUTHORITY = 4;
+   }
+ 
+   Usage usage = 3;
+diff --git a/transport/internet/tls/tls.go b/transport/internet/tls/tls.go
+index df5d1cb..b04cdef 100644
+--- a/transport/internet/tls/tls.go
++++ b/transport/internet/tls/tls.go
+@@ -7,6 +7,7 @@ import (
+ 	"math/big"
+ 	"slices"
+ 	"time"
++	"unsafe"
+ 
+ 	utls "github.com/refraction-networking/utls"
+ 	"github.com/xtls/xray-core/common/buf"
+@@ -157,6 +158,17 @@ func copyConfig(c *tls.Config) *utls.Config {
+ 		EncryptedClientHelloConfigList: c.EncryptedClientHelloConfigList,
+ 		NextProtos:                     c.NextProtos,
+ 	}
++	if c.GetClientCertificate != nil {
++		config.GetClientCertificate = func(cri *utls.CertificateRequestInfo) (*utls.Certificate, error) {
++			cert, err := c.GetClientCertificate(
++				(*tls.CertificateRequestInfo)(unsafe.Pointer(cri)),
++			)
++			if err != nil {
++				return nil, err
++			}
++			return (*utls.Certificate)(unsafe.Pointer(cert)), nil
++		}
++	}
+ 	return config
+ }
+ 

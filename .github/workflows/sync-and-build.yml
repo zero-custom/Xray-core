@@ -1,0 +1,100 @@
+# Fork: daily upstream sync only — no builds here.
+#
+# New model: `commit` 只同步、不构建. This workflow fast-forwards/rebases
+# `main` onto `upstream/main` and only verifies that `patches/` still
+# applies (`git apply --check`). If the check fails, it opens a GitHub
+# issue and leaves the conflict for the next release (cf. followup-workflow
+# §1 情形 A). Image/Release production happens only on new upstream tags
+# via the version pipeline (`.github/scripts/detect-new-tags.sh`,
+# `prepare-branch.sh`, `publish-release.sh` + `docker/mtls.Dockerfile*`).
+
+name: Sync Upstream
+
+on:
+  schedule:
+    # Daily at 00:00 UTC
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+env:
+  UPSTREAM_REPO: https://github.com/XTLS/Xray-core.git
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Add upstream remote and fetch
+        run: |
+          git remote add upstream "${{ env.UPSTREAM_REPO }}" 2>/dev/null || true
+          git fetch upstream main
+          git fetch origin '+refs/heads/*:refs/remotes/origin/*'
+
+      - name: Check for upstream changes
+        id: check
+        run: |
+          UPSTREAM=$(git rev-parse upstream/main)
+          ORIGIN=$(git rev-parse origin/main)
+          echo "upstream/main: $UPSTREAM"
+          echo "origin/main:   $ORIGIN"
+
+          if git merge-base --is-ancestor upstream/main origin/main; then
+            echo "Upstream already included — nothing to do"
+            echo "should_sync=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Upstream has new commits — will sync"
+            echo "should_sync=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Sync origin/main onto upstream/main
+        if: steps.check.outputs.should_sync == 'true'
+        run: |
+          # `git switch` (not `checkout`) to avoid ambiguity with ./main/.
+          git switch main
+          git config user.email "github-actions@github.com"
+          git config user.name "GitHub Actions"
+          git rebase upstream/main
+          git push origin main --force-with-lease
+
+      - name: Verify patches still apply (no build)
+        if: steps.check.outputs.should_sync == 'true'
+        id: patchcheck
+        run: |
+          git switch main
+          if git apply --check patches/01-mtls-client-cert.patch; then
+            echo "patch_ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "patch_ok=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open issue when patch check fails
+        if: steps.check.outputs.should_sync == 'true' && steps.patchcheck.outputs.patch_ok == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          UPSTREAM_SHA=$(git rev-parse --short upstream/main)
+          TITLE="patch rebase conflict after sync to upstream/main ($UPSTREAM_SHA)"
+          if gh issue list --search "$TITLE in:title" --state open --json title \
+              | grep -q "$UPSTREAM_SHA"; then
+            echo "Issue already open for $UPSTREAM_SHA, skipping"
+            exit 0
+          fi
+          git apply --check patches/01-mtls-client-cert.patch 2>&1 | head -30 > /tmp/patch-check.log || true
+          gh issue create --title "$TITLE" --body "$(cat <<EOF
+          Daily sync rebased \`main\` onto \`upstream/main\` ($UPSTREAM_SHA),
+          but \`patches/01-mtls-client-cert.patch\` no longer applies cleanly.
+
+          \`\`\`
+          $(cat /tmp/patch-check.log)
+          \`\`\`
+
+          The sync itself was pushed; resolve the conflict before the next release.
+          EOF
+          )"
