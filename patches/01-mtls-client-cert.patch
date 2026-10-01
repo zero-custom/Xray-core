@@ -270,9 +270,10 @@ diff --git a/transport/internet/tls/tls.go b/transport/internet/tls/tls.go
 index df5d1cb..b04cdef 100644
 --- a/transport/internet/tls/tls.go
 +++ b/transport/internet/tls/tls.go
-@@ -7,6 +7,7 @@ import (
+@@ -7,7 +7,8 @@ import (
  	"math/big"
  	"slices"
+ 	"sync/atomic"
  	"time"
 +	"unsafe"
  

@@ -19,7 +19,9 @@
 
 ## 适用基线
 
-- 上游 `XTLS/Xray-core` tag `v26.9.9`（commit `52a412d9`，2026-09-08）。
+- 上游 `XTLS/Xray-core` tag `v26.9.30`（commit `b26a91d`）。
+  v26.9.9（`52a412d9`）不再兼容：tls.go 首 hunk 上下文含
+  `sync/atomic`（v26.9.9 无此行，`apply --check` 不通过）。
 - 旧 fork `main` 备份概念：2026-06 基线 `fdb9b616`，custom 顶
   `1d42d147`（工作流修改另行处理，本 patch 只含程序定制）。
 
