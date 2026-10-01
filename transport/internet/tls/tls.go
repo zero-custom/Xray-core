@@ -8,6 +8,7 @@ import (
 	"slices"
 	"sync/atomic"
 	"time"
+	"unsafe"
 
 	utls "github.com/refraction-networking/utls"
 	"github.com/xtls/xray-core/common/buf"
@@ -173,6 +174,17 @@ func copyConfig(c *tls.Config) *utls.Config {
 		KeyLogWriter:                   c.KeyLogWriter,
 		EncryptedClientHelloConfigList: c.EncryptedClientHelloConfigList,
 		NextProtos:                     c.NextProtos,
+	}
+	if c.GetClientCertificate != nil {
+		config.GetClientCertificate = func(cri *utls.CertificateRequestInfo) (*utls.Certificate, error) {
+			cert, err := c.GetClientCertificate(
+				(*tls.CertificateRequestInfo)(unsafe.Pointer(cri)),
+			)
+			if err != nil {
+				return nil, err
+			}
+			return (*utls.Certificate)(unsafe.Pointer(cert)), nil
+		}
 	}
 	return config
 }
