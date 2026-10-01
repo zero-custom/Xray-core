@@ -64,7 +64,8 @@ if git rev-parse --verify --quiet "refs/remotes/$REMOTE/$BRANCH" >/dev/null; the
   if [ "$(git rev-list --count "$TAG..HEAD" 2>/dev/null || echo -1)" = "1" ] \
      && git log -1 --format=%s 2>/dev/null | grep -q "mTLS client cert on $TAG"; then
     log "branch already prepared (patch commit present), reusing as-is"
-    git push "$REMOTE" "$BRANCH" >>"$LOG" 2>&1 || true
+    # 完整 ref：分支与上游同名 tag 并存时裸名 push 报 matches more than one。
+    git push "$REMOTE" "refs/heads/$BRANCH:refs/heads/$BRANCH" >>"$LOG" 2>&1 || true
     log "branch ready: $BRANCH"
     exit 0
   fi
@@ -108,5 +109,5 @@ else
     -m "Baseline: $TAG." >>"$LOG" 2>&1
 fi
 
-git push "$REMOTE" "$BRANCH" >>"$LOG" 2>&1
+git push "$REMOTE" "refs/heads/$BRANCH:refs/heads/$BRANCH" >>"$LOG" 2>&1
 log "branch ready: $BRANCH"
