@@ -21,6 +21,10 @@ on:
         description: 'Rebuild even if <tag>-mtls.N already released'
         type: boolean
         default: false
+      aar_only:
+        description: 'Only build/attach the Android AAR for manual_tag (skip binaries/images/release)'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -59,7 +63,7 @@ jobs:
 
   release:
     needs: detect
-    if: needs.detect.outputs.has_pending == 'true'
+    if: needs.detect.outputs.has_pending == 'true' && github.event.inputs.aar_only != 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -173,3 +177,66 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           ARTIFACTS="$(echo dist/*.zip dist/sha256sums.txt)" sh .github/scripts/publish-release.sh "${{ matrix.tag }}"
+
+      # --- Android AAR (mTLS core) ------------------------------------------
+      # Best-effort: continue-on-error, so an AAR failure never changes this
+      # job's result nor touches the already-published binaries/images/Release.
+      # The AAR is attached to the same <tag>-mtls.N Release after publish
+      # (no change to publish-release.sh). The same composite action is reused
+      # by the standalone `aar_only` trigger below.
+      - name: Build Android AAR (mTLS core)
+        if: steps.prep.outputs.skip != 'true'
+        continue-on-error: true
+        uses: ./.github/actions/build-aar
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag: ${{ matrix.tag }}
+
+  # Standalone AAR trigger: workflow_dispatch with aar_only=true + manual_tag.
+  # Builds/attaches the AAR for an existing (or new) version branch without
+  # rebuilding binaries/images or creating a new <tag>-mtls.N Release revision.
+  build-aar:
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.aar_only == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require manual_tag
+        run: |
+          if [ -z "${{ github.event.inputs.manual_tag }}" ]; then
+            echo "::error::aar_only=true requires manual_tag=<upstream tag>"
+            exit 1
+          fi
+
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Check out version branch worktree
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          TAG="${{ github.event.inputs.manual_tag }}"
+          git remote add upstream https://github.com/XTLS/Xray-core.git 2>/dev/null || true
+          git fetch origin "+refs/heads/*:refs/remotes/origin/*" 2>/dev/null || true
+          if git show-ref --verify --quiet "refs/remotes/origin/$TAG"; then
+            REF="refs/remotes/origin/$TAG"
+          else
+            echo "branch $TAG not found on origin; creating it via prepare-branch.sh"
+            PREV_BRANCH= sh .github/scripts/prepare-branch.sh "$TAG"
+            REF="refs/heads/$TAG"
+          fi
+          git worktree add /tmp/vb "$REF"
+          git -C /tmp/vb rev-parse HEAD
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Build Android AAR (mTLS core)
+        uses: ./.github/actions/build-aar
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag: ${{ github.event.inputs.manual_tag }}
