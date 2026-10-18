@@ -173,6 +173,27 @@ else
     || die "failed to inject ndkVersion into $GRADLE"
 fi
 
+# AGP strips debug symbols from native libs on release builds, which would make
+# the APK's libgojni.so differ byte-for-byte from the AAR we built (breaking the
+# AC2 provenance check). Keep symbols for libgojni.so so the packaged lib stays
+# identical to the AAR member.
+echo "==> disabling native-lib stripping for libgojni.so (keepDebugSymbols)"
+if grep -q 'keepDebugSymbols' "$GRADLE"; then
+  echo "    keepDebugSymbols already present, leaving as-is"
+else
+  awk '
+    { print }
+    !done && /^[[:space:]]*packaging[[:space:]]*\{/ { in_pkg=1 }
+    in_pkg && !done && /^[[:space:]]*jniLibs[[:space:]]*\{/ {
+      print "            keepDebugSymbols += \"**/libgojni.so\"";
+      done=1
+    }
+  ' "$GRADLE" > "$GRADLE.new"
+  mv "$GRADLE.new" "$GRADLE"
+  grep -q 'keepDebugSymbols.*libgojni' "$GRADLE" \
+    || die "failed to inject keepDebugSymbols into $GRADLE (no packaging/jniLibs block?)"
+fi
+
 echo "==> writing V2rayNG/local.properties"
 printf 'sdk.dir=%s\n' "$ANDROID_HOME" > "$WORK_DIR/V2rayNG/local.properties"
 
