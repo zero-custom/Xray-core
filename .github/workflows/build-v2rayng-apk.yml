@@ -1,0 +1,102 @@
+# Fork: build & publish a v2rayNG APK embedding this fork's mTLS core.
+#
+# Reusable (`workflow_call`) and dispatchable (`workflow_dispatch`). Called by
+# `v2rayng-auto-sync.yml` when a newer upstream v2rayNG release appears, or run
+# manually for a specific `v2rayng-ref`. Resolves the target's
+# AndroidLibXrayLite pin and expected Xray-core version, rebuilds the AAR for
+# that pin, and publishes `v2rayNG-<ver>-mtls.N` on this fork. Independent of
+# the Xray core release pipeline (`release-mtls.yml`).
+#
+# Note: a job that calls a reusable workflow cannot use `continue-on-error`, so
+# a build failure fails this job and the whole run (accepted design trade-off).
+
+name: Build mTLS v2rayNG APK
+
+on:
+  workflow_call:
+    inputs:
+      v2rayng-ref:
+        description: 'Upstream v2rayNG tag or commit (e.g. 2.3.11)'
+        type: string
+        required: true
+      lib-ref:
+        description: 'AndroidLibXrayLite commit (assert against the submodule pin)'
+        type: string
+        required: false
+        default: ''
+      core-ref:
+        description: 'Xray-core tag to embed (skip go.mod mapping when set)'
+        type: string
+        required: false
+        default: ''
+      release-suffix:
+        description: 'Release revision N for v2rayNG-<ver>-mtls.N'
+        type: string
+        required: false
+        default: '1'
+      publish:
+        description: 'Upload APK assets to the Release'
+        type: boolean
+        required: false
+        default: true
+    secrets:
+      APP_KEYSTORE_BASE64:
+        required: true
+      APP_KEYSTORE_PASSWORD:
+        required: true
+      APP_KEYSTORE_ALIAS:
+        required: true
+      APP_KEY_PASSWORD:
+        required: true
+  workflow_dispatch:
+    inputs:
+      v2rayng-ref:
+        description: 'Upstream v2rayNG tag or commit (e.g. 2.3.11)'
+        type: string
+        required: true
+      lib-ref:
+        description: 'AndroidLibXrayLite commit (assert against the submodule pin)'
+        type: string
+        required: false
+        default: ''
+      core-ref:
+        description: 'Xray-core tag to embed (skip go.mod mapping when set)'
+        type: string
+        required: false
+        default: ''
+      release-suffix:
+        description: 'Release revision N for v2rayNG-<ver>-mtls.N'
+        type: string
+        required: false
+        default: '1'
+      publish:
+        description: 'Upload APK assets to the Release'
+        type: boolean
+        required: false
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Build mTLS v2rayNG APK
+        uses: ./.github/actions/build-v2rayng-apk
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APP_KEYSTORE_BASE64: ${{ secrets.APP_KEYSTORE_BASE64 }}
+          APP_KEYSTORE_PASSWORD: ${{ secrets.APP_KEYSTORE_PASSWORD }}
+          APP_KEYSTORE_ALIAS: ${{ secrets.APP_KEYSTORE_ALIAS }}
+          APP_KEY_PASSWORD: ${{ secrets.APP_KEY_PASSWORD }}
+          SKIP_UPLOAD: ${{ inputs.publish && 'false' || 'true' }}
+        with:
+          v2rayng-ref: ${{ inputs.v2rayng-ref }}
+          lib-ref: ${{ inputs.lib-ref }}
+          core-ref: ${{ inputs.core-ref }}
+          release-suffix: ${{ inputs.release-suffix }}

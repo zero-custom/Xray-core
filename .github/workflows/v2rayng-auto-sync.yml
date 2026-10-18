@@ -1,0 +1,121 @@
+# Fork: daily probe of upstream v2rayNG releases → rebuild + publish the mTLS APK.
+#
+# Compares the latest non-prerelease upstream v2rayNG version against the newest
+# `v2rayNG-*-mtls.*` Release published on this fork (its `buildinfo`
+# `v2rayng-ref`). Equal → no-op success. Newer → call the reusable
+# `build-v2rayng-apk.yml`. A detect/build failure fails the run and opens a
+# deduplicated issue for manual follow-up.
+#
+# Reuses `secrets: inherit` so the called workflow receives the keystore secrets
+# and GITHUB_TOKEN.
+
+name: v2rayNG auto-sync
+
+on:
+  schedule:
+    # Daily at 03:00 UTC (off-peak from the 00:00 sync / 01:00 release).
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Rebuild even if the latest v2rayNG version is already published'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      need_build: ${{ steps.detect.outputs.need_build }}
+      v2rayng_ref: ${{ steps.detect.outputs.v2rayng_ref }}
+    steps:
+      - id: detect
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: zero-custom/Xray-core
+        run: |
+          set -eu
+          UPSTREAM="$(gh api repos/2dust/v2rayNG/releases/latest --jq .tag_name)"
+          echo "upstream latest v2rayNG: '$UPSTREAM'"
+          if [ -z "$UPSTREAM" ] || [ "$UPSTREAM" = "null" ]; then
+            echo "no upstream release detected; nothing to do"
+            echo "need_build=false" >> "$GITHUB_OUTPUT"
+            echo "v2rayng_ref=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Newest v2rayNG-*-mtls.N release published on the fork.
+          BUILT_TAG="$(gh release list --limit 100 --json tagName -q '.[].tagName' 2>/dev/null \
+            | grep -E '^v2rayNG-.*-mtls\.[0-9]+$' | sort -V | tail -n 1 || true)"
+          BUILT_VER=""
+          if [ -n "$BUILT_TAG" ]; then
+            BI_DIR="$RUNNER_TEMP/v2rayng-buildinfo"
+            rm -rf "$BI_DIR"; mkdir -p "$BI_DIR"
+            if gh release download "$BUILT_TAG" --pattern '*buildinfo*' --dir "$BI_DIR" --clobber >/dev/null 2>&1; then
+              BIF="$(ls "$BI_DIR"/*buildinfo* 2>/dev/null | head -n 1 || true)"
+              if [ -n "$BIF" ]; then
+                BUILT_VER="$(grep '^v2rayng-ref=' "$BIF" | head -n 1 | cut -d= -f2- || true)"
+              fi
+            fi
+            # Fallback: derive the version from the release tag itself.
+            if [ -z "$BUILT_VER" ]; then
+              BUILT_VER="$(printf '%s\n' "$BUILT_TAG" | sed -e 's/^v2rayNG-//' -e 's/-mtls\.[0-9]*$//')"
+            fi
+          fi
+          echo "built v2rayNG version: '$BUILT_VER'"
+
+          if [ "$UPSTREAM" = "$BUILT_VER" ]; then
+            echo "already built; no-op"
+            echo "need_build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "new upstream v2rayNG release: $UPSTREAM (built: '$BUILT_VER')"
+            echo "need_build=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "v2rayng_ref=$UPSTREAM" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: detect
+    if: needs.detect.outputs.need_build == 'true' || github.event.inputs.force == 'true'
+    permissions:
+      contents: write
+    uses: ./.github/workflows/build-v2rayng-apk.yml
+    with:
+      v2rayng-ref: ${{ needs.detect.outputs.v2rayng_ref }}
+    secrets: inherit
+
+  notify:
+    needs: [detect, build]
+    if: always() && (needs.build.result == 'failure' || needs.detect.result == 'failure')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Open deduplicated failure issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: zero-custom/Xray-core
+          V2RAYNG_REF: ${{ needs.detect.outputs.v2rayng_ref }}
+        run: |
+          set -eu
+          TITLE="v2rayNG auto-sync build failed"
+          if gh issue list --search "$TITLE in:title" --state open --json title \
+              -q '.[].title' | grep -qx "$TITLE"; then
+            echo "issue already open; skipping"
+            exit 0
+          fi
+          gh issue create --title "$TITLE" --body "$(cat <<EOF
+          The daily v2rayNG auto-sync failed (detect or build).
+
+          - Upstream v2rayNG ref: \`${V2RAYNG_REF:-unknown}\`
+          - Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+
+          Likely causes: go.mod → Xray-core tag mapping failed, patch rebase
+          conflict in \`prepare-branch.sh\`, or missing keystore secrets.
+          Re-run manually once resolved; close this issue afterwards.
+          EOF
+          )"
