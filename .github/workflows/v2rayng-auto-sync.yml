@@ -1,6 +1,6 @@
 # Fork: daily probe of upstream v2rayNG releases → rebuild + publish the mTLS APK.
 #
-# Compares the latest non-prerelease upstream v2rayNG version against the newest
+# Compares the latest upstream v2rayNG tag against the newest
 # `v2rayNG-*-mtls.*` Release published on this fork (its `buildinfo`
 # `v2rayng-ref`). Equal → no-op success. Newer → call the reusable
 # `build-v2rayng-apk.yml`. A detect/build failure fails the run and opens a
@@ -39,7 +39,13 @@ jobs:
           GH_REPO: zero-custom/Xray-core
         run: |
           set -eu
-          UPSTREAM="$(gh api repos/2dust/v2rayNG/releases/latest --jq .tag_name)"
+          UPSTREAM="$(git ls-remote --tags https://github.com/2dust/v2rayNG.git \
+            | awk '{print $2}' \
+            | sed -e 's|refs/tags/||' \
+            | grep -v '\^{}$' \
+            | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
+            | sort -u -V \
+            | tail -n 1)"
           echo "upstream latest v2rayNG: '$UPSTREAM'"
           if [ -z "$UPSTREAM" ] || [ "$UPSTREAM" = "null" ]; then
             echo "no upstream release detected; nothing to do"
