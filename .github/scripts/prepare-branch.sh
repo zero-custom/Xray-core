@@ -103,11 +103,19 @@ fi
 if [ -z "$(git status --porcelain)" ]; then
   log "no changes after apply (tree already patched), treating as ready"
 else
-  git commit -m "mTLS client cert on $TAG" \
+  if ! git commit -m "mTLS client cert on $TAG" \
     -m "Single patch from main:$PATCH_FILE" \
     -m "Sources: 4dcba976 + afb37257." \
-    -m "Baseline: $TAG." >>"$LOG" 2>&1
+    -m "Baseline: $TAG." >>"$LOG" 2>&1; then
+    tail -n 40 "$LOG" >&2
+    echo "::error::git commit failed on $BRANCH" >&2
+    exit 1
+  fi
 fi
 
-git push "$REMOTE" "refs/heads/$BRANCH:refs/heads/$BRANCH" >>"$LOG" 2>&1
+if ! git push "$REMOTE" "refs/heads/$BRANCH:refs/heads/$BRANCH" >>"$LOG" 2>&1; then
+  tail -n 40 "$LOG" >&2
+  echo "::error::git push failed for $BRANCH; check that the checkout token has Contents + Workflows write (GitHub App tokens cannot push workflow files)" >&2
+  exit 1
+fi
 log "branch ready: $BRANCH"

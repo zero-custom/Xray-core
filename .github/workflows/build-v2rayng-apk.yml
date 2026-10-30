@@ -85,6 +85,9 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          # build-v2rayng-apk.sh calls prepare-branch.sh, which pushes the
+          # version branch; GITHUB_TOKEN lacks `workflows` permission.
+          token: ${{ secrets.RELEASE_PUSH_TOKEN || secrets.SYNC_TOKEN }}
 
       - name: Build mTLS v2rayNG APK
         uses: ./.github/actions/build-v2rayng-apk
