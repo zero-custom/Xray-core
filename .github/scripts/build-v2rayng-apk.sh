@@ -20,6 +20,9 @@
 #   RELEASE_SUFFIX     Release 修订号 N（默认 1）
 #   NDK_VERSION        Android NDK 版本（默认 30.0.16248370）
 #   V2RAYNG_REPO       v2rayNG 仓库 URL（默认 2dust 上游）
+#   V2RAYNG_PATCH      v2rayNG 源码补丁路径
+#                      （默认 $REPO_ROOT/.github/patches/v2rayng-mtls-ui.patch；
+#                       置空则跳过补丁，仅调试用）。补丁不适用即 fail-fast。
 #   CORE_REPO          上游 Xray-core 仓库 URL（映射 tag 用）
 #   ANDROID_HOME       Android SDK 根（必填）
 #   NDK_HOME           Android NDK 根（必填，compile-hevtun.sh 需要）
@@ -68,6 +71,21 @@ fi
 git -C "$WORK_DIR" submodule update --init --recursive
 V2RAYNG_HEAD="$(git -C "$WORK_DIR" rev-parse HEAD)"
 echo "    v2rayNG HEAD: $V2RAYNG_HEAD"
+
+# --- 1.5 apply the v2rayNG mTLS UI patch -----------------------------------
+REPO_ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+V2RAYNG_PATCH="${V2RAYNG_PATCH:-$REPO_ROOT/.github/patches/v2rayng-mtls-ui.patch}"
+V2RAYNG_PATCH_SHA=""
+if [ -n "$V2RAYNG_PATCH" ]; then
+  [ -f "$V2RAYNG_PATCH" ] || die "v2rayNG UI patch not found: $V2RAYNG_PATCH"
+  git -C "$WORK_DIR" apply --check "$V2RAYNG_PATCH" \
+    || die "v2rayNG UI patch does not apply to $V2RAYNG_REF ($V2RAYNG_HEAD); rebase $V2RAYNG_PATCH"
+  git -C "$WORK_DIR" apply "$V2RAYNG_PATCH"
+  V2RAYNG_PATCH_SHA="$(sha256sum "$V2RAYNG_PATCH" | awk '{print $1}')"
+  echo "    applied v2rayNG UI patch: $V2RAYNG_PATCH_SHA"
+else
+  echo "::warning::V2RAYNG_PATCH is empty; building without the mTLS UI" >&2
+fi
 
 LIB_SUBDIR="AndroidLibXrayLite"
 [ -d "$WORK_DIR/$LIB_SUBDIR" ] || die "submodule $LIB_SUBDIR missing in v2rayNG@$V2RAYNG_REF"
@@ -294,6 +312,7 @@ android-lib-ref=$LIB_REF
 core-ref=$CORE_REF
 core-commit=${CORE_COMMIT:-}
 aar-sha256=$AAR_SHA
+v2rayng-patch-sha256=${V2RAYNG_PATCH_SHA:-}
 EOF
 cat "$SHA_ASSET" "$BUILDINFO"
 

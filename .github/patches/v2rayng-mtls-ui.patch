@@ -1,0 +1,711 @@
+diff --git a/V2rayNG/app/src/main/java/com/v2ray/ang/core/CoreOutboundBuilder.kt b/V2rayNG/app/src/main/java/com/v2ray/ang/core/CoreOutboundBuilder.kt
+index fb135e5..50a8067 100644
+--- a/V2rayNG/app/src/main/java/com/v2ray/ang/core/CoreOutboundBuilder.kt
++++ b/V2rayNG/app/src/main/java/com/v2ray/ang/core/CoreOutboundBuilder.kt
+@@ -10,6 +10,7 @@ import com.v2ray.ang.enums.NetworkType
+ import com.v2ray.ang.extension.isNotNullEmpty
+ import com.v2ray.ang.extension.nullIfBlank
+ import com.v2ray.ang.handler.MmkvManager
++import com.v2ray.ang.handler.MtlsCertificateManager
+ import com.v2ray.ang.util.HttpUtil
+ import com.v2ray.ang.util.JsonUtil
+ import com.v2ray.ang.util.LogUtil
+@@ -568,11 +569,30 @@ object CoreOutboundBuilder {
+ 
+         streamSettings.security = streamSecurity.nullIfBlank()
+         if (streamSettings.security == null) return
++        val mtlsCertificates = if (profileItem.mtlsEnabled && streamSettings.security == AppConfig.TLS) {
++            profileItem.mtlsCertificates.orEmpty()
++                .filter { it.certPath.isNotBlank() && it.keyPath.isNotBlank() }
++                .filter {
++                    it.usage == MtlsCertificateManager.USAGE_CLIENT ||
++                        it.usage == MtlsCertificateManager.USAGE_CLIENT_AUTHORITY
++                }
++                .map {
++                    mapOf(
++                        "usage" to it.usage,
++                        "certificateFile" to it.certPath,
++                        "keyFile" to it.keyPath
++                    )
++                }
++                .ifEmpty { null }
++        } else {
++            null
++        }
+         val tlsSetting = OutboundBean.StreamSettingsBean.TlsSettingsBean(
+             allowInsecure = allowInsecure,
+             serverName = sni.nullIfBlank(),
+             fingerprint = profileItem.fingerPrint.nullIfBlank(),
+             alpn = profileItem.alpn?.split(",")?.map { it.trim() }?.filter { it.isNotEmpty() }.takeIf { !it.isNullOrEmpty() },
++            certificates = mtlsCertificates,
+             echConfigList = profileItem.echConfigList.nullIfBlank(),
+             verifyPeerCertByName = profileItem.verifyPeerCertByName.nullIfBlank(),
+             pinnedPeerCertSha256 = profileItem.pinnedCA256.nullIfBlank(),
+diff --git a/V2rayNG/app/src/main/java/com/v2ray/ang/dto/entities/MtlsCertificateEntry.kt b/V2rayNG/app/src/main/java/com/v2ray/ang/dto/entities/MtlsCertificateEntry.kt
+new file mode 100644
+index 0000000..6ad7439
+--- /dev/null
++++ b/V2rayNG/app/src/main/java/com/v2ray/ang/dto/entities/MtlsCertificateEntry.kt
+@@ -0,0 +1,23 @@
++package com.v2ray.ang.dto.entities
++
++/**
++ * A single mTLS client certificate entry stored on a [ProfileItem].
++ *
++ * [usage] mirrors the core field `tlsSettings.certificates[].usage`:
++ * - `client`             static client certificate (`certificateFile` + `keyFile`)
++ * - `client_authority`   CA certificate + CA private key used to dynamically issue
++ *                        client certificates.
++ *
++ * Paths are absolute paths inside the app private directory; see
++ * `MtlsCertificateManager` for how imported files are stored.
++ */
++data class MtlsCertificateEntry(
++    var id: String = "",
++    var usage: String = "client",
++    var certPath: String = "",
++    var keyPath: String = "",
++    var certName: String = "",
++    var keyName: String = "",
++) {
++    fun isComplete(): Boolean = certPath.isNotBlank() && keyPath.isNotBlank()
++}
+diff --git a/V2rayNG/app/src/main/java/com/v2ray/ang/dto/entities/ProfileItem.kt b/V2rayNG/app/src/main/java/com/v2ray/ang/dto/entities/ProfileItem.kt
+index 7eb270c..48905ea 100644
+--- a/V2rayNG/app/src/main/java/com/v2ray/ang/dto/entities/ProfileItem.kt
++++ b/V2rayNG/app/src/main/java/com/v2ray/ang/dto/entities/ProfileItem.kt
+@@ -45,6 +45,8 @@ data class ProfileItem(
+     var echConfigList: String? = null,
+     var verifyPeerCertByName: String? = null,
+     var pinnedCA256: String? = null,
++    var mtlsEnabled: Boolean = false,
++    var mtlsCertificates: List<MtlsCertificateEntry>? = null,
+ 
+     var publicKey: String? = null,
+     var shortId: String? = null,
+diff --git a/V2rayNG/app/src/main/java/com/v2ray/ang/handler/MtlsCertificateManager.kt b/V2rayNG/app/src/main/java/com/v2ray/ang/handler/MtlsCertificateManager.kt
+new file mode 100644
+index 0000000..f7e0a69
+--- /dev/null
++++ b/V2rayNG/app/src/main/java/com/v2ray/ang/handler/MtlsCertificateManager.kt
+@@ -0,0 +1,180 @@
++package com.v2ray.ang.handler
++
++import android.content.Context
++import android.net.Uri
++import android.provider.OpenableColumns
++import android.util.Base64
++import com.v2ray.ang.util.Utils
++import java.io.ByteArrayInputStream
++import java.io.File
++import java.security.cert.CertificateFactory
++import java.security.cert.X509Certificate
++import java.util.UUID
++
++/**
++ * Imports and manages mTLS certificate files for the server editor.
++ *
++ * Files are copied into the app private directory
++ * (`Utils.userAssetPath(context)/mtls`) so that the persisted absolute paths stay
++ * readable after the SAF permission grant is gone.
++ */
++object MtlsCertificateManager {
++    const val USAGE_CLIENT = "client"
++    const val USAGE_CLIENT_AUTHORITY = "client_authority"
++
++    /** Which field of an [com.v2ray.ang.dto.entities.MtlsCertificateEntry] a file belongs to. */
++    const val KIND_CERT = "cert"
++    const val KIND_KEY = "key"
++
++    data class ImportedFile(val path: String, val displayName: String)
++
++    private val unsafeNameChars = Regex("[^A-Za-z0-9._-]")
++
++    /**
++     * Copy the file selected by [uri] into the app private mTLS directory.
++     *
++     * @return the absolute destination path plus the original display name, or
++     *         `null` when the file cannot be copied.
++     */
++    fun importFile(context: Context, uri: Uri): ImportedFile? {
++        val displayName = queryDisplayName(context, uri)
++            ?: uri.lastPathSegment?.substringAfterLast('/')
++            ?: ""
++        val safeName = sanitizeFileName(displayName)
++
++        val baseDir = Utils.userAssetPath(context)
++        if (baseDir.isBlank()) return null
++        val dir = File(baseDir, "mtls")
++        if (!dir.isDirectory && !dir.mkdirs()) return null
++        if (!dir.isDirectory) return null
++
++        val destination = File(dir, "${UUID.randomUUID()}-$safeName")
++        return try {
++            val input = context.contentResolver.openInputStream(uri) ?: return null
++            input.use { source ->
++                destination.outputStream().use { output ->
++                    source.copyTo(output)
++                }
++            }
++            if (destination.length() <= 0L) {
++                destination.delete()
++                null
++            } else {
++                ImportedFile(destination.absolutePath, displayName.ifBlank { safeName })
++            }
++        } catch (e: Exception) {
++            destination.delete()
++            null
++        }
++    }
++
++    /**
++     * Delete a previously imported file, but only when it lives directly under
++     * the app private mTLS directory. Any error is ignored.
++     */
++    fun deleteQuietly(context: Context, path: String) {
++        if (path.isBlank()) return
++        try {
++            val baseDir = Utils.userAssetPath(context)
++            if (baseDir.isBlank()) return
++            val mtlsDir = File(baseDir, "mtls").canonicalFile
++            val target = File(path).canonicalFile
++            if (target.parentFile == mtlsDir && target.exists()) {
++                target.delete()
++            }
++        } catch (e: Exception) {
++            // Best effort: never let cleanup break the editor.
++        }
++    }
++
++    /**
++     * A file is usable when the path is non-blank, points to a regular file and
++     * the file is not empty.
++     */
++    fun isValidFile(path: String): Boolean {
++        if (path.isBlank()) return false
++        return try {
++            val file = File(path)
++            file.isFile && file.length() > 0L
++        } catch (e: Exception) {
++            false
++        }
++    }
++
++    /**
++     * Best-effort PEM validation for a certificate file. When [requireCa] is
++     * true the certificate must carry the CA basic constraint.
++     */
++    fun validateCertificate(path: String, requireCa: Boolean): Boolean {
++        val der = readPem(path, CERTIFICATE_BLOCKS) ?: return false
++        return try {
++            val certificate = CertificateFactory.getInstance("X.509")
++                .generateCertificate(ByteArrayInputStream(der)) as? X509Certificate
++                ?: return false
++            !requireCa || certificate.basicConstraints >= 0
++        } catch (e: Exception) {
++            false
++        }
++    }
++
++    /**
++     * Best-effort PEM validation for a private key. PKCS#8 and the classic
++     * PKCS#1/EC armored forms are accepted; the core performs the real parse.
++     */
++    fun validatePrivateKey(path: String): Boolean = readPem(path, PRIVATE_KEY_BLOCKS) != null
++
++    private fun readPem(path: String, labels: List<String>): ByteArray? {
++        if (path.isBlank()) return null
++        val file = File(path)
++        if (!file.isFile || file.length() <= 0L || file.length() > MAX_PEM_BYTES) return null
++        val text = try {
++            file.readText()
++        } catch (e: Exception) {
++            return null
++        }
++        for (label in labels) {
++            val begin = "-----BEGIN $label-----"
++            val end = "-----END $label-----"
++            val start = text.indexOf(begin)
++            if (start < 0) continue
++            val stop = text.indexOf(end, start + begin.length)
++            if (stop < 0) continue
++            val body = text.substring(start + begin.length, stop).replace(Regex("\\s"), "")
++            val decoded = try {
++                Base64.decode(body, Base64.DEFAULT)
++            } catch (e: Exception) {
++                null
++            }
++            if (decoded != null && decoded.isNotEmpty()) return decoded
++        }
++        return null
++    }
++
++    private const val MAX_PEM_BYTES = 1048576L
++    private val CERTIFICATE_BLOCKS = listOf("CERTIFICATE")
++    private val PRIVATE_KEY_BLOCKS = listOf("PRIVATE KEY", "RSA PRIVATE KEY", "EC PRIVATE KEY")
++
++    private fun queryDisplayName(context: Context, uri: Uri): String? {
++        return try {
++            context.contentResolver.query(
++                uri,
++                arrayOf(OpenableColumns.DISPLAY_NAME),
++                null,
++                null,
++                null
++            )?.use { cursor ->
++                if (!cursor.moveToFirst()) return@use null
++                val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
++                if (index < 0) null else cursor.getString(index)
++            }
++        } catch (e: Exception) {
++            null
++        }
++    }
++
++    private fun sanitizeFileName(name: String): String {
++        val sanitized = unsafeNameChars.replace(name.trim(), "_").trim('.', '_')
++        val capped = if (sanitized.length > 64) sanitized.take(64) else sanitized
++        return capped.ifBlank { "cert" }
++    }
++}
+diff --git a/V2rayNG/app/src/main/java/com/v2ray/ang/ui/server/BaseServerActivity.kt b/V2rayNG/app/src/main/java/com/v2ray/ang/ui/server/BaseServerActivity.kt
+index b93181d..90facd0 100644
+--- a/V2rayNG/app/src/main/java/com/v2ray/ang/ui/server/BaseServerActivity.kt
++++ b/V2rayNG/app/src/main/java/com/v2ray/ang/ui/server/BaseServerActivity.kt
+@@ -28,6 +28,7 @@ import androidx.compose.ui.res.stringArrayResource
+ import androidx.compose.ui.res.stringResource
+ import androidx.compose.ui.text.input.KeyboardType
+ import androidx.compose.ui.unit.dp
++import androidx.lifecycle.lifecycleScope
+ import com.v2ray.ang.AppConfig.REALITY
+ import com.v2ray.ang.AppConfig.TLS
+ import com.v2ray.ang.R
+@@ -39,7 +40,8 @@ import com.v2ray.ang.extension.toastSuccess
+ import com.v2ray.ang.handler.AngConfigManager
+ import com.v2ray.ang.handler.CertificateFingerprintManager
+ import com.v2ray.ang.handler.MmkvManager
+-import com.v2ray.ang.ui.base.BaseComponentActivity
++import com.v2ray.ang.handler.MtlsCertificateManager
++import com.v2ray.ang.ui.base.HelperBaseComponentActivity
+ import com.v2ray.ang.ui.compose.AppTopBar
+ import com.v2ray.ang.ui.compose.DeleteConfirmDialog
+ import com.v2ray.ang.ui.compose.FormDropdownField
+@@ -53,7 +55,7 @@ import kotlinx.coroutines.Dispatchers
+ import kotlinx.coroutines.launch
+ import kotlinx.coroutines.withContext
+ 
+-abstract class BaseServerActivity : BaseComponentActivity() {
++abstract class BaseServerActivity : HelperBaseComponentActivity() {
+ 
+     protected abstract val serverConfigType: EConfigType
+ 
+@@ -342,6 +344,11 @@ abstract class BaseServerActivity : BaseComponentActivity() {
+                 ) {
+                     Text(stringResource(R.string.pinned_ca256_action_fetch))
+                 }
++                MtlsCertificatesSection(
++                    state = state,
++                    onPickFile = { entryId, kind -> pickMtlsFile(state, entryId, kind) },
++                    onDelete = { entryId -> deleteMtlsEntry(state, entryId) }
++                )
+             } else if (state.streamSecurity == REALITY) {
+                 FormTextField(
+                     stringResource(R.string.server_lab_public_key),
+@@ -415,9 +422,84 @@ abstract class BaseServerActivity : BaseComponentActivity() {
+             toast(R.string.server_lab_final_mask)
+             return false
+         }
++        if (state.mtlsEnabled && state.streamSecurity == TLS) {
++            if (state.mtlsCertificates.isEmpty()) {
++                toast(R.string.mtls_error_empty)
++                return false
++            }
++            for (entry in state.mtlsCertificates) {
++                if (!MtlsCertificateManager.isValidFile(entry.certPath)) {
++                    toast(R.string.mtls_error_cert_missing)
++                    return false
++                }
++                if (!MtlsCertificateManager.isValidFile(entry.keyPath)) {
++                    toast(R.string.mtls_error_key_missing)
++                    return false
++                }
++            }
++        }
+         return true
+     }
+ 
++    private fun pickMtlsFile(state: ServerUiState, entryId: String, kind: String) {
++        val entry = state.mtlsCertificates.firstOrNull { it.id == entryId } ?: return
++        val isKeyFile = kind == MtlsCertificateManager.KIND_KEY
++        val requireCa = !isKeyFile && entry.usage == MtlsCertificateManager.USAGE_CLIENT_AUTHORITY
++        launchFileChooser { uri ->
++            if (uri == null) return@launchFileChooser
++            lifecycleScope.launch {
++                // Import/validate off the main thread: PEM files can be a few hundred KB.
++                val imported = withContext(Dispatchers.IO) {
++                    MtlsCertificateManager.importFile(this@BaseServerActivity, uri)
++                }
++                if (imported == null) {
++                    toast(R.string.mtls_error_copy_failed)
++                    return@launch
++                }
++                val valid = withContext(Dispatchers.IO) {
++                    if (isKeyFile) {
++                        MtlsCertificateManager.validatePrivateKey(imported.path)
++                    } else {
++                        MtlsCertificateManager.validateCertificate(imported.path, requireCa)
++                    }
++                }
++                if (!valid) {
++                    withContext(Dispatchers.IO) {
++                        MtlsCertificateManager.deleteQuietly(this@BaseServerActivity, imported.path)
++                    }
++                    toast(
++                        if (isKeyFile) R.string.mtls_error_invalid_key
++                        else R.string.mtls_error_invalid_cert
++                    )
++                    return@launch
++                }
++                val index = state.mtlsCertificates.indexOfFirst { it.id == entryId }
++                if (index < 0) {
++                    // The entry disappeared while the chooser was open: drop the copy.
++                    withContext(Dispatchers.IO) {
++                        MtlsCertificateManager.deleteQuietly(this@BaseServerActivity, imported.path)
++                    }
++                    return@launch
++                }
++                // The previously attached file is deliberately left on disk: the saved
++                // profile still references it until this edit is saved.
++                val current = state.mtlsCertificates[index]
++                state.mtlsCertificates[index] = if (isKeyFile) {
++                    current.copy(keyPath = imported.path, keyName = imported.displayName)
++                } else {
++                    current.copy(certPath = imported.path, certName = imported.displayName)
++                }
++            }
++        }
++    }
++
++    private fun deleteMtlsEntry(state: ServerUiState, entryId: String) {
++        // Removes the entry from the editor only. The imported files stay on disk: the
++        // saved profile still references them until this edit is saved, and this task
++        // does not implement certificate GC.
++        state.mtlsCertificates.removeAll { it.id == entryId }
++    }
++
+     protected fun saveServer(state: ServerUiState): Boolean {
+         if (!validateBasicConfig(state)) return false
+         val config = state.toProfileItem(initialConfig)
+diff --git a/V2rayNG/app/src/main/java/com/v2ray/ang/ui/server/MtlsCertificatesSection.kt b/V2rayNG/app/src/main/java/com/v2ray/ang/ui/server/MtlsCertificatesSection.kt
+new file mode 100644
+index 0000000..e89f4ca
+--- /dev/null
++++ b/V2rayNG/app/src/main/java/com/v2ray/ang/ui/server/MtlsCertificatesSection.kt
+@@ -0,0 +1,180 @@
++package com.v2ray.ang.ui.server
++
++import androidx.compose.foundation.clickable
++import androidx.compose.foundation.layout.Arrangement
++import androidx.compose.foundation.layout.Column
++import androidx.compose.foundation.layout.Row
++import androidx.compose.foundation.layout.Spacer
++import androidx.compose.foundation.layout.fillMaxWidth
++import androidx.compose.foundation.layout.padding
++import androidx.compose.foundation.layout.width
++import androidx.compose.material3.Card
++import androidx.compose.material3.MaterialTheme
++import androidx.compose.material3.OutlinedButton
++import androidx.compose.material3.RadioButton
++import androidx.compose.material3.Text
++import androidx.compose.material3.TextButton
++import androidx.compose.runtime.Composable
++import androidx.compose.ui.Alignment
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.res.stringResource
++import androidx.compose.ui.text.style.TextOverflow
++import androidx.compose.ui.unit.dp
++import com.v2ray.ang.R
++import com.v2ray.ang.dto.entities.MtlsCertificateEntry
++import com.v2ray.ang.handler.MtlsCertificateManager
++import com.v2ray.ang.ui.compose.SettingsSwitchItem
++import java.util.UUID
++
++/**
++ * mTLS client certificate editor shown inside the TLS branch of the server
++ * security section.
++ *
++ * Uses a plain [Column] (never a [androidx.compose.foundation.lazy.LazyColumn])
++ * because the surrounding server editor already scrolls vertically.
++ */
++@Composable
++fun MtlsCertificatesSection(
++    state: ServerUiState,
++    onPickFile: (entryId: String, kind: String) -> Unit,
++    onDelete: (entryId: String) -> Unit,
++    modifier: Modifier = Modifier,
++) {
++    Column(
++        modifier = modifier.fillMaxWidth(),
++        verticalArrangement = Arrangement.spacedBy(8.dp)
++    ) {
++        SettingsSwitchItem(
++            title = stringResource(R.string.mtls_enabled),
++            summary = stringResource(R.string.mtls_enabled_summary),
++            checked = state.mtlsEnabled,
++            onCheckedChange = { state.mtlsEnabled = it }
++        )
++
++        if (state.mtlsEnabled) {
++            if (state.mtlsCertificates.isEmpty()) {
++                Text(
++                    text = stringResource(R.string.mtls_empty),
++                    style = MaterialTheme.typography.bodyMedium,
++                    color = MaterialTheme.colorScheme.onSurfaceVariant,
++                    modifier = Modifier.padding(horizontal = 16.dp)
++                )
++            }
++
++            state.mtlsCertificates.forEachIndexed { index, entry ->
++                MtlsCertificateCard(
++                    entry = entry,
++                    index = index,
++                    onUsageChange = { usage ->
++                        state.mtlsCertificates[index] = entry.copy(usage = usage)
++                    },
++                    onPickFile = onPickFile,
++                    onDelete = onDelete
++                )
++            }
++
++            OutlinedButton(
++                onClick = {
++                    state.mtlsCertificates.add(
++                        MtlsCertificateEntry(
++                            id = UUID.randomUUID().toString(),
++                            usage = MtlsCertificateManager.USAGE_CLIENT
++                        )
++                    )
++                },
++                modifier = Modifier.padding(horizontal = 16.dp)
++            ) {
++                Text(stringResource(R.string.mtls_add))
++            }
++        }
++    }
++}
++
++@Composable
++private fun MtlsCertificateCard(
++    entry: MtlsCertificateEntry,
++    index: Int,
++    onUsageChange: (String) -> Unit,
++    onPickFile: (entryId: String, kind: String) -> Unit,
++    onDelete: (entryId: String) -> Unit,
++) {
++    Card(
++        modifier = Modifier
++            .fillMaxWidth()
++            .padding(horizontal = 16.dp)
++    ) {
++        Column(
++            modifier = Modifier.padding(12.dp),
++            verticalArrangement = Arrangement.spacedBy(8.dp)
++        ) {
++            Row(verticalAlignment = Alignment.CenterVertically) {
++                Text(
++                    text = stringResource(R.string.mtls_entry_title, index + 1),
++                    style = MaterialTheme.typography.titleSmall,
++                    modifier = Modifier.weight(1f)
++                )
++                TextButton(onClick = { onDelete(entry.id) }) {
++                    Text(stringResource(R.string.mtls_delete))
++                }
++            }
++
++            Row(verticalAlignment = Alignment.CenterVertically) {
++                RadioButton(
++                    selected = entry.usage != MtlsCertificateManager.USAGE_CLIENT_AUTHORITY,
++                    onClick = { onUsageChange(MtlsCertificateManager.USAGE_CLIENT) }
++                )
++                Text(stringResource(R.string.mtls_usage_client))
++                Spacer(Modifier.width(8.dp))
++                RadioButton(
++                    selected = entry.usage == MtlsCertificateManager.USAGE_CLIENT_AUTHORITY,
++                    onClick = { onUsageChange(MtlsCertificateManager.USAGE_CLIENT_AUTHORITY) }
++                )
++                Text(
++                    text = stringResource(R.string.mtls_usage_client_authority),
++                    modifier = Modifier.weight(1f)
++                )
++            }
++
++            MtlsFileRow(
++                label = stringResource(R.string.mtls_cert),
++                fileName = entry.certName,
++                onClick = { onPickFile(entry.id, MtlsCertificateManager.KIND_CERT) }
++            )
++            MtlsFileRow(
++                label = stringResource(R.string.mtls_key),
++                fileName = entry.keyName,
++                onClick = { onPickFile(entry.id, MtlsCertificateManager.KIND_KEY) }
++            )
++        }
++    }
++}
++
++@Composable
++private fun MtlsFileRow(
++    label: String,
++    fileName: String,
++    onClick: () -> Unit,
++) {
++    Row(
++        modifier = Modifier
++            .fillMaxWidth()
++            .clickable(onClick = onClick),
++        verticalAlignment = Alignment.CenterVertically
++    ) {
++        Column(modifier = Modifier.weight(1f)) {
++            Text(
++                text = label,
++                style = MaterialTheme.typography.labelMedium
++            )
++            Text(
++                text = fileName,
++                style = MaterialTheme.typography.bodySmall,
++                maxLines = 1,
++                overflow = TextOverflow.Ellipsis
++            )
++        }
++        TextButton(onClick = onClick) {
++            Text(stringResource(R.string.mtls_select))
++        }
++    }
++}
+diff --git a/V2rayNG/app/src/main/java/com/v2ray/ang/ui/server/ServerUiState.kt b/V2rayNG/app/src/main/java/com/v2ray/ang/ui/server/ServerUiState.kt
+index eb9bf1c..d1b730f 100644
+--- a/V2rayNG/app/src/main/java/com/v2ray/ang/ui/server/ServerUiState.kt
++++ b/V2rayNG/app/src/main/java/com/v2ray/ang/ui/server/ServerUiState.kt
+@@ -1,6 +1,7 @@
+ package com.v2ray.ang.ui.server
+ 
+ import androidx.compose.runtime.getValue
++import androidx.compose.runtime.mutableStateListOf
+ import androidx.compose.runtime.mutableStateOf
+ import androidx.compose.runtime.saveable.Saver
+ import androidx.compose.runtime.setValue
+@@ -9,11 +10,13 @@ import com.v2ray.ang.AppConfig.REALITY
+ import com.v2ray.ang.AppConfig.WIREGUARD_LOCAL_ADDRESS_V4
+ import com.v2ray.ang.AppConfig.WIREGUARD_LOCAL_MTU
+ import com.v2ray.ang.AppConfig.WIREGUARD_LOCAL_REMOTE_DNS
++import com.v2ray.ang.dto.entities.MtlsCertificateEntry
+ import com.v2ray.ang.dto.entities.ProfileItem
+ import com.v2ray.ang.enums.EConfigType
+ import com.v2ray.ang.enums.NetworkType
+ import com.v2ray.ang.extension.nullIfBlank
+ import com.v2ray.ang.util.JsonUtil
++import java.util.UUID
+ 
+ class ServerUiState(
+     configType: EConfigType,
+@@ -63,6 +66,8 @@ class ServerUiState(
+     echConfigList: String = "",
+     verifyPeerCertByName: String = "",
+     pinnedCA256: String = "",
++    mtlsEnabled: Boolean = false,
++    initialMtlsCertificates: List<MtlsCertificateEntry> = emptyList(),
+     isFetchingCert: Boolean = false
+ ) {
+     var configType by mutableStateOf(configType)
+@@ -112,6 +117,10 @@ class ServerUiState(
+     var echConfigList by mutableStateOf(echConfigList)
+     var verifyPeerCertByName by mutableStateOf(verifyPeerCertByName)
+     var pinnedCA256 by mutableStateOf(pinnedCA256)
++    var mtlsEnabled by mutableStateOf(mtlsEnabled)
++    val mtlsCertificates = mutableStateListOf<MtlsCertificateEntry>().apply {
++        addAll(initialMtlsCertificates)
++    }
+     var isFetchingCert by mutableStateOf(isFetchingCert)
+ 
+     var isRemarksError by mutableStateOf(false)
+@@ -184,7 +193,9 @@ class ServerUiState(
+             mldsa65Verify = mldsa65Verify,
+             echConfigList = echConfigList,
+             verifyPeerCertByName = verifyPeerCertByName,
+-            pinnedCA256 = pinnedCA256
++            pinnedCA256 = pinnedCA256,
++            mtlsEnabled = mtlsEnabled,
++            mtlsCertificates = mtlsCertificates.toList()
+         )
+     }
+ 
+@@ -239,7 +250,15 @@ class ServerUiState(
+                 mldsa65Verify = initialConfig.mldsa65Verify ?: "",
+                 echConfigList = initialConfig.echConfigList ?: "",
+                 verifyPeerCertByName = initialConfig.verifyPeerCertByName ?: "",
+-                pinnedCA256 = initialConfig.pinnedCA256 ?: ""
++                pinnedCA256 = initialConfig.pinnedCA256 ?: "",
++                mtlsEnabled = initialConfig.mtlsEnabled,
++                initialMtlsCertificates = initialConfig.mtlsCertificates.orEmpty().map { entry ->
++                    if (entry.id.isBlank()) {
++                        entry.copy(id = UUID.randomUUID().toString())
++                    } else {
++                        entry
++                    }
++                }
+             )
+ 
+         fun from(
+diff --git a/V2rayNG/app/src/main/res/values-zh-rCN/strings_mtls.xml b/V2rayNG/app/src/main/res/values-zh-rCN/strings_mtls.xml
+new file mode 100644
+index 0000000..a709da1
+--- /dev/null
++++ b/V2rayNG/app/src/main/res/values-zh-rCN/strings_mtls.xml
+@@ -0,0 +1,20 @@
++<?xml version="1.0" encoding="utf-8"?>
++<resources>
++    <string name="mtls_enabled">mTLS 客户端证书</string>
++    <string name="mtls_enabled_summary">向服务器发送客户端证书（仅 TLS）</string>
++    <string name="mtls_empty">尚未添加证书</string>
++    <string name="mtls_add">添加证书</string>
++    <string name="mtls_delete">删除</string>
++    <string name="mtls_cert">证书文件</string>
++    <string name="mtls_key">私钥文件</string>
++    <string name="mtls_select">选择</string>
++    <string name="mtls_usage_client">用户证书</string>
++    <string name="mtls_usage_client_authority">CA 证书（动态签发）</string>
++    <string name="mtls_entry_title">证书 %1$d</string>
++    <string name="mtls_error_cert_missing">请选择证书文件</string>
++    <string name="mtls_error_key_missing">请选择私钥文件</string>
++    <string name="mtls_error_empty">请至少添加一张证书</string>
++    <string name="mtls_error_copy_failed">文件导入失败</string>
++    <string name="mtls_error_invalid_cert">证书文件无效或不是 CA 证书</string>
++    <string name="mtls_error_invalid_key">私钥文件无效</string>
++</resources>
+diff --git a/V2rayNG/app/src/main/res/values/strings_mtls.xml b/V2rayNG/app/src/main/res/values/strings_mtls.xml
+new file mode 100644
+index 0000000..66b28af
+--- /dev/null
++++ b/V2rayNG/app/src/main/res/values/strings_mtls.xml
+@@ -0,0 +1,20 @@
++<?xml version="1.0" encoding="utf-8"?>
++<resources>
++    <string name="mtls_enabled">mTLS certificates</string>
++    <string name="mtls_enabled_summary">Send a client certificate to the server (TLS only)</string>
++    <string name="mtls_empty">No certificates yet</string>
++    <string name="mtls_add">Add certificate</string>
++    <string name="mtls_delete">Delete</string>
++    <string name="mtls_cert">Certificate</string>
++    <string name="mtls_key">Private key</string>
++    <string name="mtls_select">Select</string>
++    <string name="mtls_usage_client">Client certificate</string>
++    <string name="mtls_usage_client_authority">CA certificate (dynamic issuance)</string>
++    <string name="mtls_entry_title">Certificate %1$d</string>
++    <string name="mtls_error_cert_missing">Please select a certificate file</string>
++    <string name="mtls_error_key_missing">Please select a private key file</string>
++    <string name="mtls_error_empty">Add at least one certificate</string>
++    <string name="mtls_error_copy_failed">Failed to import file</string>
++    <string name="mtls_error_invalid_cert">Invalid certificate file (or not a CA)</string>
++    <string name="mtls_error_invalid_key">Invalid private key file</string>
++</resources>
