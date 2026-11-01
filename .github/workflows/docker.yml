@@ -18,7 +18,12 @@ on:
 
 jobs:
   build-and-push:
-    if: (github.event.action != 'published') || (github.event.action == 'published' && github.event.release.prerelease == true)
+    # Fork: disabled on purpose. Image builds are owned by the version pipeline
+    # (release workflow + docker/mtls.Dockerfile*). This upstream workflow listens
+    # to `release: published` and builds unpatched `main` source, so leaving it
+    # enabled would publish a non-mTLS image under an `-mtls` Release tag.
+    # Kept as a file (instead of deleted) so rebases stay conflict-free.
+    if: false
     runs-on: ubuntu-latest
     permissions:
       contents: read
