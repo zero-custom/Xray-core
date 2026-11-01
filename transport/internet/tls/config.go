@@ -20,6 +20,7 @@ import (
 	"github.com/xtls/xray-core/common/protocol/tls/cert"
 	"github.com/xtls/xray-core/transport/internet"
 	"golang.org/x/crypto/x509roots/fallback/bundle"
+	"golang.org/x/sync/singleflight"
 )
 
 var globalSessionCache = tls.NewLRUClientSessionCache(128)
@@ -94,6 +95,104 @@ func (c *Config) BuildCertificates() []*tls.Certificate {
 	return certs
 }
 
+// BuildClientCertificates builds a list of client TLS certificates from the
+// certificate field for mTLS (mutual TLS) authentication.
+// It filters certificates with Usage==CLIENT.
+func (c *Config) BuildClientCertificates() []*tls.Certificate {
+	if len(c.Certificate) == 0 {
+		return nil
+	}
+
+	certs := make([]*tls.Certificate, 0, len(c.Certificate))
+
+	for _, entry := range c.Certificate {
+		if entry.Usage != Certificate_CLIENT {
+			continue
+		}
+
+		certData := entry.Certificate
+		keyData := entry.Key
+
+		if entry.CertificatePath != "" {
+			content, err := filesystem.ReadCert(entry.CertificatePath)
+			if err != nil {
+				errors.LogError(context.Background(), "failed to read client certificate file: ", err)
+				continue
+			}
+			certData = content
+		}
+
+		if entry.KeyPath != "" {
+			content, err := filesystem.ReadCert(entry.KeyPath)
+			if err != nil {
+				errors.LogError(context.Background(), "failed to read client key file: ", err)
+				continue
+			}
+			keyData = content
+		}
+
+		if len(certData) == 0 {
+			certData = entry.Certificate
+		}
+		if len(keyData) == 0 {
+			keyData = entry.Key
+		}
+
+		if len(certData) == 0 || len(keyData) == 0 {
+			errors.LogWarning(context.Background(), "client certificate and key must be provided together, skipping")
+			continue
+		}
+
+		keyPair, err := tls.X509KeyPair(certData, keyData)
+		if err != nil {
+			errors.LogWarningInner(context.Background(), err, "failed to parse client X509 key pair")
+			continue
+		}
+
+		certs = append(certs, &keyPair)
+	}
+
+	if len(certs) == 0 {
+		return nil
+	}
+
+	return certs
+}
+
+func (c *Config) BuildClientAuthority() []*Certificate {
+	if len(c.Certificate) == 0 {
+		return nil
+	}
+	certs := make([]*Certificate, 0, len(c.Certificate))
+	for _, entry := range c.Certificate {
+		if entry.Usage != Certificate_CLIENT_AUTHORITY {
+			continue
+		}
+		if entry.CertificatePath != "" {
+			content, err := filesystem.ReadCert(entry.CertificatePath)
+			if err != nil {
+				errors.LogError(context.Background(), "failed to read client authority certificate file: ", err)
+				continue
+			}
+			entry.Certificate = content
+		}
+		if entry.KeyPath != "" {
+			content, err := filesystem.ReadCert(entry.KeyPath)
+			if err != nil {
+				errors.LogError(context.Background(), "failed to read client authority key file: ", err)
+				continue
+			}
+			entry.Key = content
+		}
+		if len(entry.Certificate) == 0 || len(entry.Key) == 0 {
+			errors.LogWarning(context.Background(), "client authority certificate and key must be provided together, skipping")
+			continue
+		}
+		certs = append(certs, entry)
+	}
+	return certs
+}
+
 func setupOcspTicker(entry *Certificate, callback func(isReloaded, isOcspstapling bool)) {
 	go func() {
 		if entry.OneTimeLoading {
@@ -142,12 +241,202 @@ func isCertificateExpired(c *tls.Certificate) bool {
 	return c.Leaf != nil && c.Leaf.NotAfter.Before(time.Now().Add(time.Minute*2))
 }
 
-func issueCertificate(rawCA *Certificate, domain string) (*tls.Certificate, error) {
+const clientCertRefreshMargin = time.Minute * 5
+
+type clientCertCache struct {
+	mu    sync.Mutex
+	certs map[string]*tls.Certificate
+	group singleflight.Group
+}
+
+var clientCertCaches sync.Map
+
+func getClientCertCache(c *Config) *clientCertCache {
+	if v, ok := clientCertCaches.Load(c); ok {
+		return v.(*clientCertCache)
+	}
+	v, _ := clientCertCaches.LoadOrStore(c, &clientCertCache{certs: make(map[string]*tls.Certificate)})
+	return v.(*clientCertCache)
+}
+
+func acceptableCASet(acceptableCAs [][]byte) map[string]struct{} {
+	if len(acceptableCAs) == 0 {
+		return nil
+	}
+	set := make(map[string]struct{}, len(acceptableCAs))
+	for _, ca := range acceptableCAs {
+		set[string(ca)] = struct{}{}
+	}
+	return set
+}
+
+func certificateLeaf(c *tls.Certificate) *x509.Certificate {
+	if c == nil || len(c.Certificate) == 0 {
+		return nil
+	}
+	if c.Leaf == nil {
+		leaf, err := x509.ParseCertificate(c.Certificate[0])
+		if err != nil {
+			return nil
+		}
+		c.Leaf = leaf
+	}
+	return c.Leaf
+}
+
+func chainAnchored(c *tls.Certificate, acceptable map[string]struct{}) bool {
+	if len(acceptable) == 0 {
+		return true
+	}
+	for _, der := range c.Certificate {
+		parsed, err := x509.ParseCertificate(der)
+		if err != nil {
+			continue
+		}
+		if _, ok := acceptable[string(parsed.RawIssuer)]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func validateClientCert(c *tls.Certificate, acceptable map[string]struct{}, now time.Time, requireClientAuth bool) bool {
+	leaf := certificateLeaf(c)
+	if leaf == nil {
+		return false
+	}
+	if now.Add(clientCertRefreshMargin).Before(leaf.NotBefore) || now.Add(clientCertRefreshMargin).After(leaf.NotAfter) {
+		return false
+	}
+	if requireClientAuth {
+		hasClientAuth := false
+		for _, eku := range leaf.ExtKeyUsage {
+			if eku == x509.ExtKeyUsageClientAuth {
+				hasClientAuth = true
+				break
+			}
+		}
+		if !hasClientAuth {
+			return false
+		}
+	}
+	return chainAnchored(c, acceptable)
+}
+
+func selectStaticClientCert(certs []*tls.Certificate, acceptableCAs [][]byte, now time.Time) *tls.Certificate {
+	acceptable := acceptableCASet(acceptableCAs)
+	type candidate struct {
+		cert     *tls.Certificate
+		notAfter time.Time
+		index    int
+	}
+	candidates := make([]candidate, 0, len(certs))
+	for i, parsed := range certs {
+		if !validateClientCert(parsed, acceptable, now, false) {
+			continue
+		}
+		candidates = append(candidates, candidate{parsed, certificateLeaf(parsed).NotAfter, i})
+	}
+	if len(candidates) == 0 {
+		return nil
+	}
+	slices.SortStableFunc(candidates, func(a, b candidate) int {
+		if a.notAfter.Equal(b.notAfter) {
+			return a.index - b.index
+		}
+		if a.notAfter.After(b.notAfter) {
+			return -1
+		}
+		return 1
+	})
+	return candidates[0].cert
+}
+
+func (c *Config) selectClientAuthority(cri *tls.CertificateRequestInfo, now time.Time) (*Certificate, map[string]struct{}) {
+	authorities := c.BuildClientAuthority()
+	if len(authorities) == 0 {
+		return nil, nil
+	}
+	acceptable := acceptableCASet(cri.AcceptableCAs)
+	type candidate struct {
+		ca       *Certificate
+		notAfter time.Time
+		index    int
+	}
+	candidates := make([]candidate, 0, len(authorities))
+	for i, rawCA := range authorities {
+		parsed, err := x509.ParseCertificate(rawCA.Certificate)
+		if err != nil {
+			continue
+		}
+		if now.Before(parsed.NotBefore) || now.After(parsed.NotAfter) {
+			continue
+		}
+		if len(acceptable) > 0 {
+			if _, ok := acceptable[string(parsed.RawSubject)]; !ok {
+				continue
+			}
+		}
+		candidates = append(candidates, candidate{rawCA, parsed.NotAfter, i})
+	}
+	if len(candidates) == 0 {
+		return nil, acceptable
+	}
+	slices.SortStableFunc(candidates, func(a, b candidate) int {
+		if a.notAfter.Equal(b.notAfter) {
+			return a.index - b.index
+		}
+		if a.notAfter.After(b.notAfter) {
+			return -1
+		}
+		return 1
+	})
+	return candidates[0].ca, acceptable
+}
+
+func (cc *clientCertCache) getOrIssue(c *Config, rawCA *Certificate, acceptable map[string]struct{}, now time.Time) *tls.Certificate {
+	key := string(rawCA.Certificate)
+	cc.mu.Lock()
+	if kp := cc.certs[key]; kp != nil && validateClientCert(kp, acceptable, now, true) {
+		cc.mu.Unlock()
+		return kp
+	}
+	cc.mu.Unlock()
+
+	v, err, _ := cc.group.Do(key, func() (any, error) {
+		cc.mu.Lock()
+		if kp := cc.certs[key]; kp != nil && validateClientCert(kp, acceptable, now, true) {
+			cc.mu.Unlock()
+			return kp, nil
+		}
+		cc.mu.Unlock()
+		kp, err := issueCertificate(rawCA, c.ServerName, cert.ExtKeyUsage(x509.ExtKeyUsageClientAuth))
+		if err != nil {
+			return nil, err
+		}
+		if !validateClientCert(kp, acceptable, now, true) {
+			return nil, errors.New("issued client certificate failed validation")
+		}
+		cc.mu.Lock()
+		cc.certs[key] = kp
+		cc.mu.Unlock()
+		return kp, nil
+	})
+	if err != nil {
+		errors.LogWarningInner(context.Background(), err, "failed to issue client certificate")
+		return nil
+	}
+	return v.(*tls.Certificate)
+}
+
+func issueCertificate(rawCA *Certificate, domain string, opts ...cert.Option) (*tls.Certificate, error) {
 	parent, err := cert.ParseCertificate(rawCA.Certificate, rawCA.Key)
 	if err != nil {
 		return nil, errors.New("failed to parse raw certificate").Base(err)
 	}
-	newCert, err := cert.Generate(parent, cert.CommonName(domain), cert.DNSNames(domain))
+	generateOpts := []cert.Option{cert.CommonName(domain), cert.DNSNames(domain)}
+	generateOpts = append(generateOpts, opts...)
+	newCert, err := cert.Generate(parent, generateOpts...)
 	if err != nil {
 		return nil, errors.New("failed to generate new certificate for ", domain).Base(err)
 	}
@@ -392,6 +681,7 @@ func (c *Config) GetTLSConfig(opts ...Option) *tls.Config {
 		SessionTicketsDisabled: !c.EnableSessionResumption,
 		VerifyPeerCertificate:  randCarrier.verifyPeerCert,
 	}
+
 	randCarrier.Config = config
 	if len(c.VerifyPeerCertByName) > 0 {
 		config.InsecureSkipVerify = true
@@ -413,6 +703,24 @@ func (c *Config) GetTLSConfig(opts ...Option) *tls.Config {
 		config.GetCertificate = getGetCertificateFunc(config, caCerts)
 	} else {
 		config.GetCertificate = getNewGetCertificateFunc(c.BuildCertificates(), c.RejectUnknownSni)
+	}
+
+	staticCerts := c.BuildClientCertificates()
+	if len(c.BuildClientAuthority()) > 0 || len(staticCerts) > 0 {
+		cache := getClientCertCache(c)
+		config.GetClientCertificate = func(cri *tls.CertificateRequestInfo) (*tls.Certificate, error) {
+			now := time.Now()
+			if rawCA, acceptable := c.selectClientAuthority(cri, now); rawCA != nil {
+				if kp := cache.getOrIssue(c, rawCA, acceptable, now); kp != nil {
+					return kp, nil
+				}
+			}
+			if kp := selectStaticClientCert(staticCerts, cri.AcceptableCAs, now); kp != nil {
+				return kp, nil
+			}
+			errors.LogWarning(context.Background(), "no usable client certificate: dynamic and static both unavailable")
+			return nil, nil
+		}
 	}
 
 	if sn := c.parseServerName(); len(sn) > 0 {
