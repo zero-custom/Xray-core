@@ -1,0 +1,71 @@
+name: Build Android AAR (mTLS core)
+description: |
+  gomobile-bind the mTLS core (already checked out at core-dir) into libv2ray.aar
+  and attach it to the <tag>-mtls.N Release. Shared by the release pipeline
+  (inline, best-effort) and the standalone aar_only trigger.
+
+inputs:
+  tag:
+    description: Upstream tag whose <tag>-mtls.N Release receives the AAR.
+    required: true
+  core-dir:
+    description: Path to the mTLS core worktree (the version branch checkout).
+    required: false
+    default: /tmp/vb
+  android-api:
+    description: Value passed to gomobile -androidapi (aligns with AndroidLibXrayLite).
+    required: false
+    default: '24'
+  ndk-version:
+    description: Android NDK version to install (pinned for reproducibility).
+    required: false
+    default: '29.0.14206865'
+  lib-repo:
+    description: AndroidLibXrayLite repository URL (the AAR binding layer).
+    required: false
+    default: https://github.com/2dust/AndroidLibXrayLite.git
+  lib-ref:
+    description: AndroidLibXrayLite ref/commit to check out (pinned; bump deliberately).
+    required: false
+    default: 1f3e2c5df1c248ed42630cee2bf747643d303ecc
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Android SDK
+      uses: android-actions/setup-android@v4
+      with:
+        log-accepted-android-sdk-licenses: false
+        cmdline-tools-version: '14742923'
+        packages: 'platform-tools'
+
+    - name: Install Android NDK and platform
+      shell: bash
+      env:
+        ANDROID_API: ${{ inputs.android-api }}
+        NDK_VERSION: ${{ inputs.ndk-version }}
+      run: |
+        set -eu
+        SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+        # platforms;android-24: gomobile -androidapi 24 uses android-24/android.jar
+        # for the javac bootclasspath. ndk pinned for reproducibility.
+        echo "y" | "$SDKMANAGER" --channel=0 --install \
+          "platforms;android-$ANDROID_API" \
+          "ndk;$NDK_VERSION"
+        echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+        echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+        # Best-effort extras (mirror 2dust/AndroidLibXrayLite setup); gomobile
+        # bind only needs javac + platforms/android-24 + NDK, so a miss here
+        # must not block the essential install above.
+        echo "y" | "$SDKMANAGER" --channel=0 --install \
+          "platforms;android-37.0" "build-tools;37.0.0" \
+          || echo "::warning::optional SDK packages unavailable; continuing"
+
+    - name: Build and attach AAR
+      shell: bash
+      env:
+        ANDROID_API: ${{ inputs.android-api }}
+        CORE_DIR: ${{ inputs.core-dir }}
+        LIB_REPO: ${{ inputs.lib-repo }}
+        LIB_REF: ${{ inputs.lib-ref }}
+      run: sh .github/scripts/build-aar.sh "${{ inputs.tag }}"

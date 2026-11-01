@@ -1,0 +1,78 @@
+name: Build mTLS v2rayNG APK
+description: |
+  Build a signed v2rayNG APK that embeds the mTLS libv2ray.aar built from this
+  fork's core, then publish it as a v2rayNG-<ver>-mtls.N Release. Shared by the
+  standalone dispatch trigger and the daily auto-sync workflow.
+
+  Composite actions cannot read the `secrets` context: the caller must pass
+  GH_TOKEN and the APP_KEYSTORE_* values through its step `env:`, which these
+  run steps inherit.
+
+inputs:
+  v2rayng-ref:
+    description: Upstream v2rayNG tag or commit to build (e.g. 2.3.11).
+    required: true
+  lib-ref:
+    description: AndroidLibXrayLite commit to assert against the submodule pin.
+    required: false
+    default: ''
+  core-ref:
+    description: Upstream Xray-core tag to embed (skip go.mod mapping when set).
+    required: false
+    default: ''
+  release-suffix:
+    description: Release revision N for v2rayNG-<ver>-mtls.N.
+    required: false
+    default: '1'
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version-file: 'go.mod'
+
+    - name: Set up Android SDK
+      uses: android-actions/setup-android@v4
+      with:
+        log-accepted-android-sdk-licenses: false
+        cmdline-tools-version: '14742923'
+        packages: 'platforms;android-37.0 build-tools;37.0.0 platform-tools'
+
+    - name: Install Android NDK
+      shell: bash
+      run: |
+        set -eu
+        SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+        echo "y" | "$SDKMANAGER" --channel=0 --install "ndk;30.0.16248370"
+        echo "NDK_HOME=$ANDROID_HOME/ndk/30.0.16248370" >> "$GITHUB_ENV"
+        echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/30.0.16248370" >> "$GITHUB_ENV"
+        echo "NDK_VERSION=30.0.16248370" >> "$GITHUB_ENV"
+        echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+
+    - name: Set up Java
+      uses: actions/setup-java@v4
+      with:
+        distribution: temurin
+        java-version: '21'
+
+    - name: Decode keystore
+      shell: bash
+      run: |
+        set -eu
+        if [ -n "${APP_KEYSTORE_BASE64:-}" ]; then
+          echo "$APP_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/mtls-v2rayng.jks"
+          echo "ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/mtls-v2rayng.jks" >> "$GITHUB_ENV"
+        else
+          echo "::warning::APP_KEYSTORE_BASE64 not provided; signing will fail unless SKIP_SIGN=true"
+        fi
+
+    - name: Build and publish mTLS v2rayNG APK
+      shell: bash
+      env:
+        V2RAYNG_REF: ${{ inputs.v2rayng-ref }}
+        LIB_REF: ${{ inputs.lib-ref }}
+        CORE_REF: ${{ inputs.core-ref }}
+        RELEASE_SUFFIX: ${{ inputs.release-suffix }}
+      run: sh .github/scripts/build-v2rayng-apk.sh "${{ inputs.v2rayng-ref }}"
