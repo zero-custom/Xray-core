@@ -1,0 +1,147 @@
+# Fork: build & publish a v2rayNG APK embedding this fork's mTLS core.
+#
+# Reusable (`workflow_call`) and dispatchable (`workflow_dispatch`). Called by
+# `v2rayng-auto-sync.yml` when a newer upstream v2rayNG release appears, or run
+# manually for a specific `v2rayng-ref`. Resolves the target's
+# AndroidLibXrayLite pin and expected Xray-core version, rebuilds the AAR for
+# that pin, and publishes `v2rayNG-<ver>-mtls.N` on this fork. Independent of
+# the Xray core release pipeline (`release-mtls.yml`).
+#
+# Note: a job that calls a reusable workflow cannot use `continue-on-error`, so
+# a build failure fails this job and the whole run (accepted design trade-off).
+
+name: Build mTLS v2rayNG APK
+
+on:
+  workflow_call:
+    inputs:
+      v2rayng-ref:
+        description: 'Upstream v2rayNG tag or commit (e.g. 2.3.11)'
+        type: string
+        required: true
+      lib-ref:
+        description: 'AndroidLibXrayLite commit (assert against the submodule pin)'
+        type: string
+        required: false
+        default: ''
+      core-ref:
+        description: 'Xray-core tag to embed (skip go.mod mapping when set)'
+        type: string
+        required: false
+        default: ''
+      release-suffix:
+        description: 'Release revision N for v2rayNG-<ver>-mtls.N'
+        type: string
+        required: false
+        default: '1'
+      publish:
+        description: 'Upload APK assets to the Release'
+        type: boolean
+        required: false
+        default: true
+    secrets:
+      APP_KEYSTORE_BASE64:
+        required: true
+      APP_KEYSTORE_PASSWORD:
+        required: true
+      APP_KEYSTORE_ALIAS:
+        required: true
+      APP_KEY_PASSWORD:
+        required: true
+  workflow_dispatch:
+    inputs:
+      v2rayng-ref:
+        description: 'Upstream v2rayNG tag or commit (e.g. 2.3.11)'
+        type: string
+        required: true
+      lib-ref:
+        description: 'AndroidLibXrayLite commit (assert against the submodule pin)'
+        type: string
+        required: false
+        default: ''
+      core-ref:
+        description: 'Xray-core tag to embed (skip go.mod mapping when set)'
+        type: string
+        required: false
+        default: ''
+      release-suffix:
+        description: 'Release revision N for v2rayNG-<ver>-mtls.N'
+        type: string
+        required: false
+        default: '1'
+      publish:
+        description: 'Upload APK assets to the Release'
+        type: boolean
+        required: false
+        default: true
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          # build-v2rayng-apk.sh calls prepare-branch.sh, which pushes the
+          # version branch; GITHUB_TOKEN lacks `workflows` permission.
+          token: ${{ secrets.RELEASE_PUSH_TOKEN || secrets.SYNC_TOKEN }}
+
+      - name: Build mTLS v2rayNG APK
+        uses: ./.github/actions/build-v2rayng-apk
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APP_KEYSTORE_BASE64: ${{ secrets.APP_KEYSTORE_BASE64 }}
+          APP_KEYSTORE_PASSWORD: ${{ secrets.APP_KEYSTORE_PASSWORD }}
+          APP_KEYSTORE_ALIAS: ${{ secrets.APP_KEYSTORE_ALIAS }}
+          APP_KEY_PASSWORD: ${{ secrets.APP_KEY_PASSWORD }}
+          SKIP_UPLOAD: ${{ inputs.publish && 'false' || 'true' }}
+        with:
+          v2rayng-ref: ${{ inputs.v2rayng-ref }}
+          lib-ref: ${{ inputs.lib-ref }}
+          core-ref: ${{ inputs.core-ref }}
+          release-suffix: ${{ inputs.release-suffix }}
+
+  # --- Failure notify -------------------------------------------------------
+  # 被调方内部兜底：调用方（含 v2rayng-auto-sync）不能对 reusable workflow
+  # 用 continue-on-error，且 workflow_dispatch 直跑时无上层 notify。标题与
+  # v2rayng-auto-sync 的 "v2rayNG auto-sync build failed" 区分；auto-sync
+  # 场景可能两条并存（信息互补：一条定位 v2rayNG ref，一条定位本 workflow run）。
+  # 去重逻辑与 release-mtls.notify 一致。
+  notify:
+    needs: build
+    if: always() && needs.build.result == 'failure'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Open deduplicated failure issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: zero-custom/Xray-core
+          V2RAYNG_REF: ${{ inputs.v2rayng-ref }}
+        run: |
+          set -eu
+          TITLE="v2rayNG mTLS APK build failed"
+          if gh issue list --search "$TITLE in:title" --state open --json title \
+              -q '.[].title' | grep -qx "$TITLE"; then
+            echo "issue already open; skipping"
+            exit 0
+          fi
+          gh issue create --title "$TITLE" --body "$(cat <<EOF
+          The mTLS v2rayNG APK build failed.
+
+          - v2rayNG ref: \`${V2RAYNG_REF:-unknown}\`
+          - Workflow: ${GITHUB_WORKFLOW}
+          - Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+
+          Likely causes: v2rayNG UI patch rebase conflict
+          (\`v2rayng-mtls-ui.patch\` does not apply to the new v2rayNG ref),
+          AAR build failure, keystore/secret issues, or APK sign/upload failure.
+          Re-run manually once resolved; close this issue afterwards.
+          EOF
+          )"
