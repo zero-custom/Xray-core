@@ -88,6 +88,8 @@ jobs:
     if: needs.detect.outputs.need_build == 'true' || github.event.inputs.force == 'true'
     permissions:
       contents: write
+      # The called reusable workflow's notify job opens issues on failure.
+      issues: write
     uses: ./.github/workflows/build-v2rayng-apk.yml
     with:
       v2rayng-ref: ${{ needs.detect.outputs.v2rayng_ref }}
