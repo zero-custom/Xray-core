@@ -41,6 +41,22 @@ index fb135e5..50a8067 100644
              echConfigList = profileItem.echConfigList.nullIfBlank(),
              verifyPeerCertByName = profileItem.verifyPeerCertByName.nullIfBlank(),
              pinnedPeerCertSha256 = profileItem.pinnedCA256.nullIfBlank(),
+diff --git a/V2rayNG/app/src/main/java/com/v2ray/ang/dto/UrlContentRequest.kt b/V2rayNG/app/src/main/java/com/v2ray/ang/dto/UrlContentRequest.kt
+index c8440a4..62c56e3 100644
+--- a/V2rayNG/app/src/main/java/com/v2ray/ang/dto/UrlContentRequest.kt
++++ b/V2rayNG/app/src/main/java/com/v2ray/ang/dto/UrlContentRequest.kt
+@@ -7,5 +7,8 @@ data class UrlContentRequest(
+     val proxyUsername: String? = null,
+     val proxyPassword: String? = null,
+     val userAgent: String? = null,
+-    val requestHeaders: String? = null
+-)
+\ No newline at end of file
++    val requestHeaders: String? = null,
++    val clientCertPath: String? = null,
++    val clientKeyPath: String? = null,
++    val serverCaPath: String? = null,
++)
 diff --git a/V2rayNG/app/src/main/java/com/v2ray/ang/dto/entities/MtlsCertificateEntry.kt b/V2rayNG/app/src/main/java/com/v2ray/ang/dto/entities/MtlsCertificateEntry.kt
 new file mode 100644
 index 0000000..6ad7439
@@ -83,12 +99,124 @@ index 7eb270c..48905ea 100644
  
      var publicKey: String? = null,
      var shortId: String? = null,
+diff --git a/V2rayNG/app/src/main/java/com/v2ray/ang/dto/entities/SubscriptionItem.kt b/V2rayNG/app/src/main/java/com/v2ray/ang/dto/entities/SubscriptionItem.kt
+index 258400f..4c8fbe1 100644
+--- a/V2rayNG/app/src/main/java/com/v2ray/ang/dto/entities/SubscriptionItem.kt
++++ b/V2rayNG/app/src/main/java/com/v2ray/ang/dto/entities/SubscriptionItem.kt
+@@ -15,5 +15,9 @@ data class SubscriptionItem(
+     var userAgent: String? = null,
+     var requestHeaders: String? = null,
+     var usageInfo: SubscriptionUsageInfo? = null,
++    var mtlsEnabled: Boolean = false,
++    var mtlsCertificates: List<MtlsCertificateEntry>? = null,
++    var serverCaPath: String? = null,
++    var serverCaName: String? = null,
+ )
+ 
+diff --git a/V2rayNG/app/src/main/java/com/v2ray/ang/handler/AngConfigManager.kt b/V2rayNG/app/src/main/java/com/v2ray/ang/handler/AngConfigManager.kt
+index 68bbe36..de8d034 100644
+--- a/V2rayNG/app/src/main/java/com/v2ray/ang/handler/AngConfigManager.kt
++++ b/V2rayNG/app/src/main/java/com/v2ray/ang/handler/AngConfigManager.kt
+@@ -29,6 +29,7 @@ import com.v2ray.ang.util.QRCodeDecoder
+ import com.v2ray.ang.util.Utils
+ import okhttp3.Headers
+ import java.net.URI
++import java.util.UUID
+ 
+ object AngConfigManager {
+ 
+@@ -300,10 +301,13 @@ object AngConfigManager {
+     ) {
+         val keyToProfile = linkedMapOf<String, ProfileItem>()
+         val rawConfigs = mutableMapOf<String, String>()
++        val subscription = MmkvManager.decodeSubscription(subid)
+ 
+         configs.forEach { parsed ->
+             val key = Utils.getUuid()
+-            keyToProfile[key] = parsed.profile
++            keyToProfile[key] = subscription
++                ?.let { applySubscriptionMtls(parsed.profile, it) }
++                ?: parsed.profile
+             parsed.rawConfig?.let { raw -> rawConfigs[key] = raw }
+         }
+ 
+@@ -315,6 +319,26 @@ object AngConfigManager {
+         )
+     }
+ 
++    /**
++     * Copy the subscription-level mTLS certificates onto a profile. Only plain
++     * TLS outbounds can carry them: REALITY, non-TLS and CUSTOM profiles are
++     * returned unchanged.
++     */
++    internal fun applySubscriptionMtls(
++        profile: ProfileItem,
++        subscription: SubscriptionItem,
++    ): ProfileItem {
++        if (!subscription.mtlsEnabled) return profile
++        if (profile.configType == EConfigType.CUSTOM) return profile
++        if (!profile.security.equals(AppConfig.TLS, ignoreCase = true)) return profile
++        val certificates = subscription.mtlsCertificates.orEmpty().filter { it.isComplete() }
++        if (certificates.isEmpty()) return profile
++        return profile.copy(
++            mtlsEnabled = true,
++            mtlsCertificates = certificates.map { it.copy(id = UUID.randomUUID().toString()) }
++        )
++    }
++
+     /**
+      * Parses a custom configuration server.
+      *
+@@ -490,6 +514,19 @@ object AngConfigManager {
+             val proxyUsername = SettingsManager.getSocksUsername()
+             val proxyPassword = SettingsManager.getSocksPassword()
+ 
++            // Only a complete `client` entry authenticates the fetch; a
++            // `client_authority` pair is reserved for outbound handshakes.
++            val fetchClient = if (it.subscription.mtlsEnabled) {
++                it.subscription.mtlsCertificates.orEmpty().firstOrNull { entry ->
++                    entry.usage == MtlsCertificateManager.USAGE_CLIENT && entry.isComplete()
++                }
++            } else {
++                null
++            }
++            val serverCaPath = it.subscription.serverCaPath?.takeIf { path ->
++                it.subscription.mtlsEnabled && path.isNotBlank()
++            }
++
+             // Account info (traffic, expiry, support link) the panel sends in the response headers.
+             var usageInfo: SubscriptionUsageInfo? = null
+             val captureUsageInfo: (Headers) -> Unit = { headers ->
+@@ -511,7 +548,10 @@ object AngConfigManager {
+                         timeout = 15000,
+                         httpPort = httpPort,
+                         proxyUsername = proxyUsername,
+-                        proxyPassword = proxyPassword
++                        proxyPassword = proxyPassword,
++                        clientCertPath = fetchClient?.certPath,
++                        clientKeyPath = fetchClient?.keyPath,
++                        serverCaPath = serverCaPath
+                     ),
+                     captureUsageInfo
+                 )
+@@ -525,7 +565,10 @@ object AngConfigManager {
+                         UrlContentRequest(
+                             url = url,
+                             userAgent = userAgent,
+-                            requestHeaders = requestHeaders
++                            requestHeaders = requestHeaders,
++                            clientCertPath = fetchClient?.certPath,
++                            clientKeyPath = fetchClient?.keyPath,
++                            serverCaPath = serverCaPath
+                         ),
+                         captureUsageInfo
+                     )
 diff --git a/V2rayNG/app/src/main/java/com/v2ray/ang/handler/MtlsCertificateManager.kt b/V2rayNG/app/src/main/java/com/v2ray/ang/handler/MtlsCertificateManager.kt
 new file mode 100644
-index 0000000..f7e0a69
+index 0000000..78f9a53
 --- /dev/null
 +++ b/V2rayNG/app/src/main/java/com/v2ray/ang/handler/MtlsCertificateManager.kt
-@@ -0,0 +1,180 @@
+@@ -0,0 +1,296 @@
 +package com.v2ray.ang.handler
 +
 +import android.content.Context
@@ -98,12 +226,14 @@ index 0000000..f7e0a69
 +import com.v2ray.ang.util.Utils
 +import java.io.ByteArrayInputStream
 +import java.io.File
++import java.security.KeyFactory
 +import java.security.cert.CertificateFactory
 +import java.security.cert.X509Certificate
++import java.security.spec.PKCS8EncodedKeySpec
 +import java.util.UUID
 +
 +/**
-+ * Imports and manages mTLS certificate files for the server editor.
++ * Imports and manages mTLS certificate files for the server and subscription editors.
 + *
 + * Files are copied into the app private directory
 + * (`Utils.userAssetPath(context)/mtls`) so that the persisted absolute paths stay
@@ -214,32 +344,146 @@ index 0000000..f7e0a69
 +     */
 +    fun validatePrivateKey(path: String): Boolean = readPem(path, PRIVATE_KEY_BLOCKS) != null
 +
-+    private fun readPem(path: String, labels: List<String>): ByteArray? {
-+        if (path.isBlank()) return null
-+        val file = File(path)
-+        if (!file.isFile || file.length() <= 0L || file.length() > MAX_PEM_BYTES) return null
-+        val text = try {
-+            file.readText()
-+        } catch (e: Exception) {
-+            return null
-+        }
++    /**
++     * Read every PEM block whose label is in [labels], in file order. A CA bundle
++     * may contain several `CERTIFICATE` blocks; missing or unreadable files
++     * yield an empty list.
++     */
++    fun readPemBlocks(path: String, labels: List<String>): List<ByteArray> {
++        val text = readPemText(path) ?: return emptyList()
++        return readPemBlocksFromText(text, labels)
++    }
++
++    internal fun readPemBlocksFromText(text: String, labels: List<String>): List<ByteArray> {
++        val blocks = mutableListOf<ByteArray>()
 +        for (label in labels) {
 +            val begin = "-----BEGIN $label-----"
 +            val end = "-----END $label-----"
-+            val start = text.indexOf(begin)
-+            if (start < 0) continue
-+            val stop = text.indexOf(end, start + begin.length)
-+            if (stop < 0) continue
-+            val body = text.substring(start + begin.length, stop).replace(Regex("\\s"), "")
-+            val decoded = try {
-+                Base64.decode(body, Base64.DEFAULT)
++            var searchFrom = 0
++            while (true) {
++                val start = text.indexOf(begin, searchFrom)
++                if (start < 0) break
++                val contentStart = start + begin.length
++                val stop = text.indexOf(end, contentStart)
++                if (stop < 0) break
++                searchFrom = stop + end.length
++                val body = text.substring(contentStart, stop).replace(Regex("\\s"), "")
++                val decoded = try {
++                    Base64.decode(body, Base64.DEFAULT)
++                } catch (e: Exception) {
++                    null
++                }
++                if (decoded != null && decoded.isNotEmpty()) {
++                    blocks.add(decoded)
++                }
++            }
++        }
++        return blocks
++    }
++
++    internal fun readPemText(path: String): String? {
++        if (path.isBlank()) return null
++        return try {
++            val file = File(path)
++            if (!file.isFile || file.length() <= 0L || file.length() > MAX_PEM_BYTES) return null
++            file.readText()
++        } catch (e: Exception) {
++            null
++        }
++    }
++
++    /** Parse every `CERTIFICATE` block of [path] as an X.509 certificate. */
++    fun loadCertificates(path: String): List<X509Certificate> {
++        val certificateFactory = CertificateFactory.getInstance("X.509")
++        return readPemBlocks(path, CERTIFICATE_BLOCKS).mapNotNull { der ->
++            try {
++                certificateFactory.generateCertificate(ByteArrayInputStream(der)) as? X509Certificate
 +            } catch (e: Exception) {
 +                null
 +            }
-+            if (decoded != null && decoded.isNotEmpty()) return decoded
 +        }
-+        return null
 +    }
++
++    /**
++     * Every PEM block of [path] must be a parseable X.509 certificate, and at
++     * least one block is required. Used for a subscription server CA bundle.
++     */
++    fun validateCertificateBundle(path: String): Boolean {
++        val blocks = readPemBlocks(path, CERTIFICATE_BLOCKS)
++        if (blocks.isEmpty()) return false
++        return try {
++            val certificateFactory = CertificateFactory.getInstance("X.509")
++            blocks.all { der ->
++                certificateFactory.generateCertificate(ByteArrayInputStream(der)) is X509Certificate
++            }
++        } catch (e: Exception) {
++            false
++        }
++    }
++
++    /**
++     * Validate a private key that will be handed to the TLS stack (PKCS#8 or a
++     * PKCS#1 RSA key). Encrypted keys and SEC1 EC keys are rejected.
++     */
++    fun validatePrivateKeyForFetch(path: String): Boolean {
++        val text = readPemText(path) ?: return false
++        if (isUnsupportedPrivateKey(text)) return false
++        val pkcs1 = readPemBlocksFromText(text, listOf("RSA PRIVATE KEY")).firstOrNull()
++        if (pkcs1 != null) {
++            return canParse("RSA", wrapPkcs1RsaAsPkcs8(pkcs1))
++        }
++        val pkcs8 = readPemBlocksFromText(text, listOf("PRIVATE KEY")).firstOrNull() ?: return false
++        return canParse("RSA", pkcs8) || canParse("EC", pkcs8)
++    }
++
++    internal fun isUnsupportedPrivateKey(text: String): Boolean =
++        text.contains("-----BEGIN ENCRYPTED PRIVATE KEY-----") ||
++            text.contains("-----BEGIN EC PRIVATE KEY-----") ||
++            text.contains("Proc-Type: 4,ENCRYPTED")
++
++    private fun canParse(algorithm: String, der: ByteArray): Boolean {
++        return try {
++            KeyFactory.getInstance(algorithm).generatePrivate(PKCS8EncodedKeySpec(der))
++            true
++        } catch (e: Exception) {
++            false
++        }
++    }
++
++    /**
++     * Wrap a PKCS#1 RSA private key in a PKCS#8 `PrivateKeyInfo` so the JCA can
++     * parse it. The output is `SEQUENCE { INTEGER 0, AlgorithmIdentifier
++     * rsaEncryption, OCTET STRING key }`.
++     */
++    internal fun wrapPkcs1RsaAsPkcs8(pkcs1: ByteArray): ByteArray {
++        val version = byteArrayOf(0x02, 0x01, 0x00)
++        val rsaAlgorithmIdentifier = byteArrayOf(
++            0x30, 0x0d, 0x06, 0x09,
++            0x2a, 0x86.toByte(), 0x48, 0x86.toByte(), 0xf7.toByte(), 0x0d, 0x01, 0x01, 0x01,
++            0x05, 0x00
++        )
++        val body = version + rsaAlgorithmIdentifier + derElement(0x04, pkcs1)
++        return derElement(0x30, body)
++    }
++
++    private fun derElement(tag: Int, content: ByteArray): ByteArray {
++        val length = content.size
++        val lengthBytes = when {
++            length < 0x80 -> byteArrayOf(length.toByte())
++            length <= 0xff -> byteArrayOf(0x81.toByte(), length.toByte())
++            length <= 0xffff -> byteArrayOf(0x82.toByte(), (length shr 8).toByte(), length.toByte())
++            else -> byteArrayOf(
++                0x83.toByte(),
++                (length shr 16).toByte(),
++                (length shr 8).toByte(),
++                length.toByte()
++            )
++        }
++        return byteArrayOf(tag.toByte()) + lengthBytes + content
++    }
++
++    private fun readPem(path: String, labels: List<String>): ByteArray? =
++        readPemBlocks(path, labels).firstOrNull()
 +
 +    private const val MAX_PEM_BYTES = 1048576L
 +    private val CERTIFICATE_BLOCKS = listOf("CERTIFICATE")
@@ -399,10 +643,10 @@ index b93181d..90facd0 100644
          val config = state.toProfileItem(initialConfig)
 diff --git a/V2rayNG/app/src/main/java/com/v2ray/ang/ui/server/MtlsCertificatesSection.kt b/V2rayNG/app/src/main/java/com/v2ray/ang/ui/server/MtlsCertificatesSection.kt
 new file mode 100644
-index 0000000..e89f4ca
+index 0000000..7f90801
 --- /dev/null
 +++ b/V2rayNG/app/src/main/java/com/v2ray/ang/ui/server/MtlsCertificatesSection.kt
-@@ -0,0 +1,180 @@
+@@ -0,0 +1,199 @@
 +package com.v2ray.ang.ui.server
 +
 +import androidx.compose.foundation.clickable
@@ -432,32 +676,36 @@ index 0000000..e89f4ca
 +import java.util.UUID
 +
 +/**
-+ * mTLS client certificate editor shown inside the TLS branch of the server
-+ * security section.
++ * Generic mTLS certificate editor. Used by the server editor and by the
++ * subscription editor, which keep their entries in different state holders.
 + *
 + * Uses a plain [Column] (never a [androidx.compose.foundation.lazy.LazyColumn])
-+ * because the surrounding server editor already scrolls vertically.
++ * because the surrounding editor already scrolls vertically.
 + */
 +@Composable
 +fun MtlsCertificatesSection(
-+    state: ServerUiState,
++    enabled: Boolean,
++    entries: MutableList<MtlsCertificateEntry>,
++    onEnabledChange: (Boolean) -> Unit,
 +    onPickFile: (entryId: String, kind: String) -> Unit,
 +    onDelete: (entryId: String) -> Unit,
 +    modifier: Modifier = Modifier,
++    title: String? = null,
++    summary: String? = null,
 +) {
 +    Column(
 +        modifier = modifier.fillMaxWidth(),
 +        verticalArrangement = Arrangement.spacedBy(8.dp)
 +    ) {
 +        SettingsSwitchItem(
-+            title = stringResource(R.string.mtls_enabled),
-+            summary = stringResource(R.string.mtls_enabled_summary),
-+            checked = state.mtlsEnabled,
-+            onCheckedChange = { state.mtlsEnabled = it }
++            title = title ?: stringResource(R.string.mtls_enabled),
++            summary = summary ?: stringResource(R.string.mtls_enabled_summary),
++            checked = enabled,
++            onCheckedChange = onEnabledChange
 +        )
 +
-+        if (state.mtlsEnabled) {
-+            if (state.mtlsCertificates.isEmpty()) {
++        if (enabled) {
++            if (entries.isEmpty()) {
 +                Text(
 +                    text = stringResource(R.string.mtls_empty),
 +                    style = MaterialTheme.typography.bodyMedium,
@@ -466,12 +714,12 @@ index 0000000..e89f4ca
 +                )
 +            }
 +
-+            state.mtlsCertificates.forEachIndexed { index, entry ->
++            entries.forEachIndexed { index, entry ->
 +                MtlsCertificateCard(
 +                    entry = entry,
 +                    index = index,
 +                    onUsageChange = { usage ->
-+                        state.mtlsCertificates[index] = entry.copy(usage = usage)
++                        entries[index] = entry.copy(usage = usage)
 +                    },
 +                    onPickFile = onPickFile,
 +                    onDelete = onDelete
@@ -480,7 +728,7 @@ index 0000000..e89f4ca
 +
 +            OutlinedButton(
 +                onClick = {
-+                    state.mtlsCertificates.add(
++                    entries.add(
 +                        MtlsCertificateEntry(
 +                            id = UUID.randomUUID().toString(),
 +                            usage = MtlsCertificateManager.USAGE_CLIENT
@@ -494,6 +742,21 @@ index 0000000..e89f4ca
 +        }
 +    }
 +}
++
++@Composable
++fun MtlsCertificatesSection(
++    state: ServerUiState,
++    onPickFile: (entryId: String, kind: String) -> Unit,
++    onDelete: (entryId: String) -> Unit,
++    modifier: Modifier = Modifier,
++) = MtlsCertificatesSection(
++    enabled = state.mtlsEnabled,
++    entries = state.mtlsCertificates,
++    onEnabledChange = { state.mtlsEnabled = it },
++    onPickFile = onPickFile,
++    onDelete = onDelete,
++    modifier = modifier,
++)
 +
 +@Composable
 +private fun MtlsCertificateCard(
@@ -555,7 +818,7 @@ index 0000000..e89f4ca
 +}
 +
 +@Composable
-+private fun MtlsFileRow(
++internal fun MtlsFileRow(
 +    label: String,
 +    fileName: String,
 +    onClick: () -> Unit,
@@ -657,12 +920,690 @@ index eb9bf1c..d1b730f 100644
              )
  
          fun from(
+diff --git a/V2rayNG/app/src/main/java/com/v2ray/ang/ui/subscription/SubEditActivity.kt b/V2rayNG/app/src/main/java/com/v2ray/ang/ui/subscription/SubEditActivity.kt
+index 793f446..1516cb3 100644
+--- a/V2rayNG/app/src/main/java/com/v2ray/ang/ui/subscription/SubEditActivity.kt
++++ b/V2rayNG/app/src/main/java/com/v2ray/ang/ui/subscription/SubEditActivity.kt
+@@ -16,8 +16,11 @@ import androidx.compose.material3.Scaffold
+ import androidx.compose.runtime.Composable
+ import androidx.compose.runtime.getValue
+ import androidx.compose.runtime.mutableStateOf
++import androidx.compose.runtime.saveable.listSaver
+ import androidx.compose.runtime.saveable.rememberSaveable
+ import androidx.compose.runtime.setValue
++import androidx.compose.runtime.snapshots.SnapshotStateList
++import androidx.compose.runtime.toMutableStateList
+ import androidx.compose.ui.Modifier
+ import androidx.compose.ui.res.painterResource
+ import androidx.compose.ui.res.stringResource
+@@ -26,15 +29,18 @@ import androidx.compose.ui.unit.dp
+ import androidx.lifecycle.lifecycleScope
+ import com.v2ray.ang.AppConfig
+ import com.v2ray.ang.R
++import com.v2ray.ang.dto.entities.MtlsCertificateEntry
+ import com.v2ray.ang.dto.entities.SubscriptionItem
+ import com.v2ray.ang.enums.EConfigType
+ import com.v2ray.ang.extension.toLongEx
++import com.v2ray.ang.extension.toast
+ import com.v2ray.ang.extension.toastSuccess
+ import com.v2ray.ang.handler.MmkvManager
++import com.v2ray.ang.handler.MtlsCertificateManager
+ import com.v2ray.ang.handler.SettingsChangeManager
+ import com.v2ray.ang.handler.SettingsManager
+ import com.v2ray.ang.handler.SubscriptionUpdater
+-import com.v2ray.ang.ui.base.BaseComponentActivity
++import com.v2ray.ang.ui.base.HelperBaseComponentActivity
+ import com.v2ray.ang.ui.compose.AppTopBar
+ import com.v2ray.ang.ui.compose.DeleteConfirmDialog
+ import com.v2ray.ang.ui.compose.FormDropdownField
+@@ -42,11 +48,22 @@ import com.v2ray.ang.ui.compose.FormTextField
+ import com.v2ray.ang.ui.compose.NavigationBarsSpacer
+ import com.v2ray.ang.ui.compose.SettingsSwitchItem
+ import com.v2ray.ang.ui.compose.verticalScrollbar
++import com.v2ray.ang.util.JsonUtil
+ import com.v2ray.ang.util.Utils
+ import kotlinx.coroutines.Dispatchers
+ import kotlinx.coroutines.launch
++import kotlinx.coroutines.withContext
++import java.util.UUID
+ 
+-class SubEditActivity : BaseComponentActivity() {
++private val mtlsCertListSaver = listSaver<SnapshotStateList<MtlsCertificateEntry>, String>(
++    save = { entries -> entries.map { JsonUtil.toJson(it) } },
++    restore = { saved ->
++        saved.mapNotNull { JsonUtil.fromJsonSafe(it, MtlsCertificateEntry::class.java) }
++            .toMutableStateList()
++    }
++)
++
++class SubEditActivity : HelperBaseComponentActivity() {
+     private val editSubId by lazy { intent.getStringExtra("subId").orEmpty() }
+     private lateinit var suggestions: List<String>
+     private lateinit var subItem: SubscriptionItem
+@@ -72,7 +89,11 @@ class SubEditActivity : BaseComponentActivity() {
+             profileSuggestions = suggestions,
+             onBackClick = { finish() },
+             onSave = { saveServer(it) },
+-            onDelete = { deleteServer() }
++            onDelete = { deleteServer() },
++            onPickMtlsFile = { entries, entryId, kind ->
++                pickSubscriptionMtlsFile(entries, entryId, kind)
++            },
++            onPickServerCa = { onPicked -> pickSubscriptionServerCa(onPicked) }
+         )
+     }
+ 
+@@ -92,6 +113,7 @@ class SubEditActivity : BaseComponentActivity() {
+         if (subItem.autoUpdate && subItem.updateInterval < AppConfig.SUBSCRIPTION_MIN_INTERVAL_MINUTES) {
+             return false
+         }
++        if (!validateSubscriptionMtls(subItem)) return false
+ 
+         MmkvManager.encodeSubscription(editSubId, subItem)
+         SubscriptionUpdater.syncOne(subId = editSubId)
+@@ -101,6 +123,131 @@ class SubEditActivity : BaseComponentActivity() {
+         return true
+     }
+ 
++    private fun validateSubscriptionMtls(subItem: SubscriptionItem): Boolean {
++        if (!subItem.mtlsEnabled) return true
++        val entries = subItem.mtlsCertificates.orEmpty()
++        if (entries.isEmpty()) {
++            toast(R.string.mtls_error_empty)
++            return false
++        }
++        for (entry in entries) {
++            if (!MtlsCertificateManager.isValidFile(entry.certPath)) {
++                toast(R.string.mtls_error_cert_missing)
++                return false
++            }
++            if (!MtlsCertificateManager.isValidFile(entry.keyPath)) {
++                toast(R.string.mtls_error_key_missing)
++                return false
++            }
++            val isClient = entry.usage == MtlsCertificateManager.USAGE_CLIENT
++            val requireCa = entry.usage == MtlsCertificateManager.USAGE_CLIENT_AUTHORITY
++            if (!MtlsCertificateManager.validateCertificate(entry.certPath, requireCa)) {
++                toast(R.string.mtls_error_invalid_cert)
++                return false
++            }
++            val keyValid = if (isClient) {
++                MtlsCertificateManager.validatePrivateKeyForFetch(entry.keyPath)
++            } else {
++                MtlsCertificateManager.validatePrivateKey(entry.keyPath)
++            }
++            if (!keyValid) {
++                toast(R.string.mtls_error_invalid_key)
++                return false
++            }
++        }
++        val serverCaPath = subItem.serverCaPath
++        if (!serverCaPath.isNullOrBlank() &&
++            !MtlsCertificateManager.validateCertificateBundle(serverCaPath)
++        ) {
++            toast(R.string.sub_mtls_error_server_ca)
++            return false
++        }
++        return true
++    }
++
++    private fun pickSubscriptionMtlsFile(
++        entries: MutableList<MtlsCertificateEntry>,
++        entryId: String,
++        kind: String,
++    ) {
++        val entry = entries.firstOrNull { it.id == entryId } ?: return
++        val isKeyFile = kind == MtlsCertificateManager.KIND_KEY
++        val isClient = entry.usage == MtlsCertificateManager.USAGE_CLIENT
++        val requireCa = !isKeyFile && entry.usage == MtlsCertificateManager.USAGE_CLIENT_AUTHORITY
++        launchFileChooser { uri ->
++            if (uri == null) return@launchFileChooser
++            lifecycleScope.launch {
++                val imported = withContext(Dispatchers.IO) {
++                    MtlsCertificateManager.importFile(this@SubEditActivity, uri)
++                }
++                if (imported == null) {
++                    toast(R.string.mtls_error_copy_failed)
++                    return@launch
++                }
++                val valid = withContext(Dispatchers.IO) {
++                    if (isKeyFile) {
++                        if (isClient) {
++                            MtlsCertificateManager.validatePrivateKeyForFetch(imported.path)
++                        } else {
++                            MtlsCertificateManager.validatePrivateKey(imported.path)
++                        }
++                    } else {
++                        MtlsCertificateManager.validateCertificate(imported.path, requireCa)
++                    }
++                }
++                if (!valid) {
++                    withContext(Dispatchers.IO) {
++                        MtlsCertificateManager.deleteQuietly(this@SubEditActivity, imported.path)
++                    }
++                    toast(
++                        if (isKeyFile) R.string.mtls_error_invalid_key
++                        else R.string.mtls_error_invalid_cert
++                    )
++                    return@launch
++                }
++                val index = entries.indexOfFirst { it.id == entryId }
++                if (index < 0) {
++                    withContext(Dispatchers.IO) {
++                        MtlsCertificateManager.deleteQuietly(this@SubEditActivity, imported.path)
++                    }
++                    return@launch
++                }
++                val current = entries[index]
++                entries[index] = if (isKeyFile) {
++                    current.copy(keyPath = imported.path, keyName = imported.displayName)
++                } else {
++                    current.copy(certPath = imported.path, certName = imported.displayName)
++                }
++            }
++        }
++    }
++
++    private fun pickSubscriptionServerCa(onPicked: (MtlsCertificateManager.ImportedFile) -> Unit) {
++        launchFileChooser { uri ->
++            if (uri == null) return@launchFileChooser
++            lifecycleScope.launch {
++                val imported = withContext(Dispatchers.IO) {
++                    MtlsCertificateManager.importFile(this@SubEditActivity, uri)
++                }
++                if (imported == null) {
++                    toast(R.string.mtls_error_copy_failed)
++                    return@launch
++                }
++                val valid = withContext(Dispatchers.IO) {
++                    MtlsCertificateManager.validateCertificateBundle(imported.path)
++                }
++                if (!valid) {
++                    withContext(Dispatchers.IO) {
++                        MtlsCertificateManager.deleteQuietly(this@SubEditActivity, imported.path)
++                    }
++                    toast(R.string.mtls_error_invalid_cert)
++                    return@launch
++                }
++                onPicked(imported)
++            }
++        }
++    }
++
+     private fun deleteServer(): Boolean {
+         if (editSubId.isNotEmpty()) {
+             lifecycleScope.launch(Dispatchers.IO) {
+@@ -120,7 +267,9 @@ fun SubEditScreen(
+     profileSuggestions: List<String>,
+     onBackClick: () -> Unit,
+     onSave: (SubscriptionItem) -> Boolean,
+-    onDelete: () -> Unit
++    onDelete: () -> Unit,
++    onPickMtlsFile: (MutableList<MtlsCertificateEntry>, String, String) -> Unit,
++    onPickServerCa: ((MtlsCertificateManager.ImportedFile) -> Unit) -> Unit
+ ) {
+     //val context = LocalContext.current
+     var remarks by rememberSaveable { mutableStateOf(initial.remarks.orEmpty()) }
+@@ -137,6 +286,16 @@ fun SubEditScreen(
+     var allowInsecureUrl by rememberSaveable { mutableStateOf(initial.allowInsecureUrl) }
+     var prevProfile by rememberSaveable { mutableStateOf(initial.prevProfile ?: "") }
+     var nextProfile by rememberSaveable { mutableStateOf(initial.nextProfile ?: "") }
++    var mtlsEnabled by rememberSaveable { mutableStateOf(initial.mtlsEnabled) }
++    val mtlsCertificates = rememberSaveable(saver = mtlsCertListSaver) {
++        initial.mtlsCertificates.orEmpty()
++            .map { entry ->
++                if (entry.id.isBlank()) entry.copy(id = UUID.randomUUID().toString()) else entry
++            }
++            .toMutableStateList()
++    }
++    var serverCaPath by rememberSaveable { mutableStateOf(initial.serverCaPath.orEmpty()) }
++    var serverCaName by rememberSaveable { mutableStateOf(initial.serverCaName.orEmpty()) }
+ 
+     var showDeleteConfirm by rememberSaveable { mutableStateOf(false) }
+     val confirmRemove = MmkvManager.decodeSettingsBool(AppConfig.PREF_CONFIRM_REMOVE, false)
+@@ -155,6 +314,10 @@ fun SubEditScreen(
+         subItem.prevProfile = prevProfile
+         subItem.nextProfile = nextProfile
+         subItem.allowInsecureUrl = allowInsecureUrl
++        subItem.mtlsEnabled = mtlsEnabled
++        subItem.mtlsCertificates = mtlsCertificates.toList()
++        subItem.serverCaPath = serverCaPath.ifBlank { null }
++        subItem.serverCaName = serverCaName.ifBlank { null }
+         return subItem
+     }
+ 
+@@ -247,6 +410,29 @@ fun SubEditScreen(
+                 checked = allowInsecureUrl,
+                 onCheckedChange = { allowInsecureUrl = it }
+             )
++            SubscriptionMtlsSection(
++                enabled = mtlsEnabled,
++                entries = mtlsCertificates,
++                serverCaPath = serverCaPath,
++                serverCaName = serverCaName,
++                onEnabledChange = { mtlsEnabled = it },
++                onPickFile = { entryId, kind ->
++                    onPickMtlsFile(mtlsCertificates, entryId, kind)
++                },
++                onDelete = { entryId ->
++                    mtlsCertificates.removeAll { it.id == entryId }
++                },
++                onPickServerCa = {
++                    onPickServerCa { imported ->
++                        serverCaPath = imported.path
++                        serverCaName = imported.displayName
++                    }
++                },
++                onClearServerCa = {
++                    serverCaPath = ""
++                    serverCaName = ""
++                }
++            )
+             FormDropdownField(
+                 label = stringResource(R.string.sub_setting_pre_profile),
+                 placeholder = stringResource(R.string.sub_setting_pre_profile_tip),
+diff --git a/V2rayNG/app/src/main/java/com/v2ray/ang/ui/subscription/SubscriptionMtlsSection.kt b/V2rayNG/app/src/main/java/com/v2ray/ang/ui/subscription/SubscriptionMtlsSection.kt
+new file mode 100644
+index 0000000..a0571d5
+--- /dev/null
++++ b/V2rayNG/app/src/main/java/com/v2ray/ang/ui/subscription/SubscriptionMtlsSection.kt
+@@ -0,0 +1,101 @@
++package com.v2ray.ang.ui.subscription
++
++import androidx.compose.foundation.layout.Arrangement
++import androidx.compose.foundation.layout.Column
++import androidx.compose.foundation.layout.Row
++import androidx.compose.foundation.layout.fillMaxWidth
++import androidx.compose.foundation.layout.padding
++import androidx.compose.material3.Card
++import androidx.compose.material3.MaterialTheme
++import androidx.compose.material3.Text
++import androidx.compose.material3.TextButton
++import androidx.compose.runtime.Composable
++import androidx.compose.ui.Alignment
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.res.stringResource
++import androidx.compose.ui.text.style.TextOverflow
++import androidx.compose.ui.unit.dp
++import com.v2ray.ang.R
++import com.v2ray.ang.dto.entities.MtlsCertificateEntry
++import com.v2ray.ang.ui.server.MtlsCertificatesSection
++
++/**
++ * Subscription-level mTLS configuration: the certificate list shared by the
++ * subscription fetch and the imported TLS nodes, plus an optional CA used only
++ * to verify the subscription server.
++ *
++ * Uses a plain [Column] because the subscription editor already scrolls.
++ */
++@Composable
++fun SubscriptionMtlsSection(
++    enabled: Boolean,
++    entries: MutableList<MtlsCertificateEntry>,
++    serverCaPath: String,
++    serverCaName: String,
++    onEnabledChange: (Boolean) -> Unit,
++    onPickFile: (entryId: String, kind: String) -> Unit,
++    onDelete: (entryId: String) -> Unit,
++    onPickServerCa: () -> Unit,
++    onClearServerCa: () -> Unit,
++    modifier: Modifier = Modifier,
++) {
++    Column(
++        modifier = modifier.fillMaxWidth(),
++        verticalArrangement = Arrangement.spacedBy(8.dp)
++    ) {
++        MtlsCertificatesSection(
++            enabled = enabled,
++            entries = entries,
++            onEnabledChange = onEnabledChange,
++            onPickFile = onPickFile,
++            onDelete = onDelete,
++            title = stringResource(R.string.sub_mtls_enabled),
++            summary = stringResource(R.string.sub_mtls_enabled_summary)
++        )
++
++        if (enabled) {
++            Card(
++                modifier = Modifier
++                    .fillMaxWidth()
++                    .padding(horizontal = 16.dp)
++            ) {
++                Column(
++                    modifier = Modifier.padding(12.dp),
++                    verticalArrangement = Arrangement.spacedBy(4.dp)
++                ) {
++                    Row(verticalAlignment = Alignment.CenterVertically) {
++                        Text(
++                            text = stringResource(R.string.sub_mtls_server_ca),
++                            style = MaterialTheme.typography.titleSmall,
++                            modifier = Modifier.weight(1f)
++                        )
++                        if (serverCaPath.isNotBlank()) {
++                            TextButton(onClick = onClearServerCa) {
++                                Text(stringResource(R.string.sub_mtls_server_ca_clear))
++                            }
++                        }
++                    }
++                    Row(
++                        modifier = Modifier.fillMaxWidth(),
++                        verticalAlignment = Alignment.CenterVertically
++                    ) {
++                        Text(
++                            text = if (serverCaPath.isBlank()) {
++                                stringResource(R.string.sub_mtls_server_ca_empty)
++                            } else {
++                                serverCaName
++                            },
++                            style = MaterialTheme.typography.bodySmall,
++                            maxLines = 1,
++                            overflow = TextOverflow.Ellipsis,
++                            modifier = Modifier.weight(1f)
++                        )
++                        TextButton(onClick = onPickServerCa) {
++                            Text(stringResource(R.string.sub_mtls_server_ca_select))
++                        }
++                    }
++                }
++            }
++        }
++    }
++}
+diff --git a/V2rayNG/app/src/main/java/com/v2ray/ang/util/HttpUtil.kt b/V2rayNG/app/src/main/java/com/v2ray/ang/util/HttpUtil.kt
+index 12b92e3..070c55b 100644
+--- a/V2rayNG/app/src/main/java/com/v2ray/ang/util/HttpUtil.kt
++++ b/V2rayNG/app/src/main/java/com/v2ray/ang/util/HttpUtil.kt
+@@ -112,7 +112,14 @@ object HttpUtil {
+      */
+     fun getUrlContent(request: UrlContentRequest): String? {
+         val url = request.url ?: return null
+-        val client = buildOkHttpClient(request.timeout, request.httpPort, request.proxyUsername, request.proxyPassword, followRedirects = true)
++        val client = buildOkHttpClient(
++            request.timeout,
++            request.httpPort,
++            request.proxyUsername,
++            request.proxyPassword,
++            followRedirects = true,
++            tls = buildTlsContext(request, url, runCatching { URL(url).host }.getOrNull())
++        )
+         val requestBuilder = Request.Builder()
+             .url(url)
+             .get()
+@@ -152,10 +159,18 @@ object HttpUtil {
+         var currentUrl = request.url
+         var redirects = 0
+         val maxRedirects = 3
++        val originalHost = request.url?.let { runCatching { URL(it).host }.getOrNull() }
+ 
+         while (redirects++ < maxRedirects) {
+             if (currentUrl == null) continue
+-            val client = buildOkHttpClient(request.timeout, request.httpPort, request.proxyUsername, request.proxyPassword, followRedirects = false)
++            val client = buildOkHttpClient(
++                request.timeout,
++                request.httpPort,
++                request.proxyUsername,
++                request.proxyPassword,
++                followRedirects = false,
++                tls = buildTlsContext(request, currentUrl, originalHost)
++            )
+             val finalUserAgent = if (request.userAgent.isNullOrBlank()) {
+                 "v2rayNG/${BuildConfig.VERSION_NAME}"
+             } else {
+@@ -230,7 +245,8 @@ object HttpUtil {
+         httpPort: Int,
+         proxyUsername: String?,
+         proxyPassword: String?,
+-        followRedirects: Boolean
++        followRedirects: Boolean,
++        tls: TlsClientContext? = null
+     ): OkHttpClient {
+         val builder = OkHttpClient.Builder()
+             .connectTimeout(timeout.toLong(), TimeUnit.MILLISECONDS)
+@@ -238,6 +254,10 @@ object HttpUtil {
+             .followRedirects(followRedirects)
+             .followSslRedirects(followRedirects)
+ 
++        if (tls != null) {
++            builder.sslSocketFactory(tls.socketFactory, tls.trustManager)
++        }
++
+         if (httpPort != 0) {
+             builder.proxy(Proxy(Proxy.Type.HTTP, InetSocketAddress(LOOPBACK, httpPort)))
+             if (!proxyUsername.isNullOrBlank() && !proxyPassword.isNullOrBlank()) {
+@@ -256,6 +276,41 @@ object HttpUtil {
+         return builder.build()
+     }
+ 
++    /**
++     * Build TLS material only for an HTTPS request whose host is the host of the
++     * original URL. A cross-host redirect therefore never receives the
++     * subscription client certificate or the subscription server CA.
++     */
++    private fun buildTlsContext(
++        request: UrlContentRequest,
++        currentUrl: String?,
++        originalHost: String?
++    ): TlsClientContext? {
++        if (!hasTlsOptions(request)) return null
++        if (!isOriginalTlsTarget(currentUrl, originalHost)) return null
++        return MtlsSslContextFactory.create(
++            request.clientCertPath,
++            request.clientKeyPath,
++            request.serverCaPath
++        )
++    }
++
++    private fun hasTlsOptions(request: UrlContentRequest): Boolean =
++        !request.clientCertPath.isNullOrBlank() ||
++            !request.clientKeyPath.isNullOrBlank() ||
++            !request.serverCaPath.isNullOrBlank()
++
++    internal fun isOriginalTlsTarget(currentUrl: String?, originalHost: String?): Boolean {
++        if (currentUrl.isNullOrBlank() || originalHost.isNullOrBlank()) return false
++        val url = try {
++            URL(currentUrl)
++        } catch (e: MalformedURLException) {
++            return false
++        }
++        if (!url.protocol.equals("https", ignoreCase = true)) return false
++        return url.host.equals(originalHost, ignoreCase = true)
++    }
++
+     private fun resolveLocation(baseUrl: String, raw: String): String? {
+         return try {
+             val locUri = URI(raw)
+@@ -280,7 +335,14 @@ object HttpUtil {
+         targetFile: File
+     ): Boolean {
+         val url = request.url ?: return false
+-        val client = buildOkHttpClient(request.timeout, request.httpPort, request.proxyUsername, request.proxyPassword, followRedirects = true)
++        val client = buildOkHttpClient(
++            request.timeout,
++            request.httpPort,
++            request.proxyUsername,
++            request.proxyPassword,
++            followRedirects = true,
++            tls = buildTlsContext(request, url, runCatching { URL(url).host }.getOrNull())
++        )
+         val requestBuilder = Request.Builder()
+             .url(url)
+             .get()
+diff --git a/V2rayNG/app/src/main/java/com/v2ray/ang/util/MtlsSslContextFactory.kt b/V2rayNG/app/src/main/java/com/v2ray/ang/util/MtlsSslContextFactory.kt
+new file mode 100644
+index 0000000..456967e
+--- /dev/null
++++ b/V2rayNG/app/src/main/java/com/v2ray/ang/util/MtlsSslContextFactory.kt
+@@ -0,0 +1,164 @@
++package com.v2ray.ang.util
++
++import com.v2ray.ang.handler.MtlsCertificateManager
++import java.io.IOException
++import java.security.KeyFactory
++import java.security.KeyStore
++import java.security.PrivateKey
++import java.security.cert.Certificate
++import java.security.spec.PKCS8EncodedKeySpec
++import javax.net.ssl.KeyManager
++import javax.net.ssl.KeyManagerFactory
++import javax.net.ssl.SSLContext
++import javax.net.ssl.SSLSocketFactory
++import javax.net.ssl.TrustManager
++import javax.net.ssl.TrustManagerFactory
++import javax.net.ssl.X509TrustManager
++
++/**
++ * TLS material used by the subscription HTTP client.
++ *
++ * [trustManager] must be passed together with [socketFactory] so OkHttp keeps
++ * validating the server against the same trust anchors.
++ */
++data class TlsClientContext(
++    val socketFactory: SSLSocketFactory,
++    val trustManager: X509TrustManager,
++)
++
++/**
++ * Builds an [SSLContext] with an optional client certificate and/or a custom
++ * server CA bundle. Certificate and private-key contents never leave memory and
++ * are never logged.
++ */
++object MtlsSslContextFactory {
++
++    /**
++     * @return `null` when no option is set; otherwise a context configured with
++     *         the requested client identity and/or server trust anchors.
++     * @throws IOException when a required file is missing, unreadable or
++     *         unsupported. Callers must not fall back to an unauthenticated
++     *         request after this happens.
++     */
++    fun create(
++        clientCertPath: String?,
++        clientKeyPath: String?,
++        serverCaPath: String?,
++    ): TlsClientContext? {
++        val hasCert = !clientCertPath.isNullOrBlank()
++        val hasKey = !clientKeyPath.isNullOrBlank()
++        val hasServerCa = !serverCaPath.isNullOrBlank()
++        if (!hasCert && !hasKey && !hasServerCa) return null
++        if (hasCert != hasKey) {
++            throw IOException("client certificate and key must be provided together")
++        }
++
++        val trustManager = if (hasServerCa) {
++            buildTrustManager(serverCaPath!!)
++        } else {
++            defaultTrustManager()
++        }
++        val keyManagers = if (hasCert) {
++            buildKeyManagers(clientCertPath!!, clientKeyPath!!)
++        } else {
++            null
++        }
++
++        return try {
++            val context = SSLContext.getInstance("TLS")
++            context.init(keyManagers, arrayOf<TrustManager>(trustManager), null)
++            TlsClientContext(context.socketFactory, trustManager)
++        } catch (e: Exception) {
++            throw IOException("cannot initialise TLS context: ${e.message}", e)
++        }
++    }
++
++    private fun defaultTrustManager(): X509TrustManager {
++        return try {
++            val factory = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm())
++            factory.init(null as KeyStore?)
++            factory.trustManagers.filterIsInstance<X509TrustManager>().firstOrNull()
++                ?: throw IOException("no default X509 trust manager available")
++        } catch (e: IOException) {
++            throw e
++        } catch (e: Exception) {
++            throw IOException("cannot initialise the default trust manager: ${e.message}", e)
++        }
++    }
++
++    private fun buildTrustManager(serverCaPath: String): X509TrustManager {
++        val certificates = MtlsCertificateManager.loadCertificates(serverCaPath)
++        if (certificates.isEmpty()) {
++            throw IOException("server CA file is empty or not a certificate bundle")
++        }
++        return try {
++            val keyStore = KeyStore.getInstance(KeyStore.getDefaultType())
++            keyStore.load(null, null)
++            certificates.forEachIndexed { index, certificate ->
++                keyStore.setCertificateEntry("ca-$index", certificate)
++            }
++            val factory = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm())
++            factory.init(keyStore)
++            factory.trustManagers.filterIsInstance<X509TrustManager>().firstOrNull()
++                ?: throw IOException("no X509 trust manager available")
++        } catch (e: IOException) {
++            throw e
++        } catch (e: Exception) {
++            throw IOException("cannot load the server CA bundle: ${e.message}", e)
++        }
++    }
++
++    private fun buildKeyManagers(clientCertPath: String, clientKeyPath: String): Array<KeyManager> {
++        val chain = MtlsCertificateManager.loadCertificates(clientCertPath)
++        if (chain.isEmpty()) {
++            throw IOException("client certificate is empty or unreadable")
++        }
++        val text = MtlsCertificateManager.readPemText(clientKeyPath)
++            ?: throw IOException("client private key is empty or unreadable")
++        val privateKey = parsePrivateKey(text, chain.first().publicKey.algorithm)
++
++        return try {
++            val password = charArrayOf()
++            val keyStore = KeyStore.getInstance(KeyStore.getDefaultType())
++            keyStore.load(null, null)
++            val certificateChain = Array<Certificate>(chain.size) { index -> chain[index] }
++            keyStore.setKeyEntry("client", privateKey, password, certificateChain)
++            val factory = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm())
++            factory.init(keyStore, password)
++            factory.keyManagers
++        } catch (e: Exception) {
++            throw IOException("cannot load the client certificate: ${e.message}", e)
++        }
++    }
++
++    internal fun parsePrivateKey(text: String, certificateAlgorithm: String): PrivateKey {
++        if (MtlsCertificateManager.isUnsupportedPrivateKey(text)) {
++            throw IOException("encrypted and SEC1 EC private keys are not supported")
++        }
++        val pkcs1 = MtlsCertificateManager.readPemBlocksFromText(text, listOf("RSA PRIVATE KEY"))
++            .firstOrNull()
++        if (pkcs1 != null) {
++            if (!certificateAlgorithm.equals("RSA", ignoreCase = true)) {
++                throw IOException("RSA private key does not match the certificate")
++            }
++            return generatePrivate("RSA", MtlsCertificateManager.wrapPkcs1RsaAsPkcs8(pkcs1))
++        }
++        val pkcs8 = MtlsCertificateManager.readPemBlocksFromText(text, listOf("PRIVATE KEY"))
++            .firstOrNull()
++            ?: throw IOException("no supported private key found")
++        val algorithm = when (certificateAlgorithm.uppercase()) {
++            "RSA" -> "RSA"
++            "EC" -> "EC"
++            else -> throw IOException("unsupported certificate key algorithm: $certificateAlgorithm")
++        }
++        return generatePrivate(algorithm, pkcs8)
++    }
++
++    private fun generatePrivate(algorithm: String, der: ByteArray): PrivateKey {
++        return try {
++            KeyFactory.getInstance(algorithm).generatePrivate(PKCS8EncodedKeySpec(der))
++        } catch (e: Exception) {
++            throw IOException("cannot parse the private key: ${e.message}", e)
++        }
++    }
++}
 diff --git a/V2rayNG/app/src/main/res/values-zh-rCN/strings_mtls.xml b/V2rayNG/app/src/main/res/values-zh-rCN/strings_mtls.xml
 new file mode 100644
-index 0000000..a709da1
+index 0000000..e5a8a49
 --- /dev/null
 +++ b/V2rayNG/app/src/main/res/values-zh-rCN/strings_mtls.xml
-@@ -0,0 +1,20 @@
+@@ -0,0 +1,27 @@
 +<?xml version="1.0" encoding="utf-8"?>
 +<resources>
 +    <string name="mtls_enabled">mTLS 客户端证书</string>
@@ -682,13 +1623,20 @@ index 0000000..a709da1
 +    <string name="mtls_error_copy_failed">文件导入失败</string>
 +    <string name="mtls_error_invalid_cert">证书文件无效或不是 CA 证书</string>
 +    <string name="mtls_error_invalid_key">私钥文件无效</string>
++    <string name="sub_mtls_enabled">订阅 mTLS 客户端证书</string>
++    <string name="sub_mtls_enabled_summary">拉取该订阅时使用客户端证书，并注入导入的 TLS 节点</string>
++    <string name="sub_mtls_server_ca">订阅服务器 CA</string>
++    <string name="sub_mtls_server_ca_empty">使用系统信任库</string>
++    <string name="sub_mtls_server_ca_select">选择</string>
++    <string name="sub_mtls_server_ca_clear">清除</string>
++    <string name="sub_mtls_error_server_ca">订阅服务器 CA 文件无效</string>
 +</resources>
 diff --git a/V2rayNG/app/src/main/res/values/strings_mtls.xml b/V2rayNG/app/src/main/res/values/strings_mtls.xml
 new file mode 100644
-index 0000000..66b28af
+index 0000000..1b51de4
 --- /dev/null
 +++ b/V2rayNG/app/src/main/res/values/strings_mtls.xml
-@@ -0,0 +1,20 @@
+@@ -0,0 +1,27 @@
 +<?xml version="1.0" encoding="utf-8"?>
 +<resources>
 +    <string name="mtls_enabled">mTLS certificates</string>
@@ -708,4 +1656,257 @@ index 0000000..66b28af
 +    <string name="mtls_error_copy_failed">Failed to import file</string>
 +    <string name="mtls_error_invalid_cert">Invalid certificate file (or not a CA)</string>
 +    <string name="mtls_error_invalid_key">Invalid private key file</string>
++    <string name="sub_mtls_enabled">Subscription mTLS certificates</string>
++    <string name="sub_mtls_enabled_summary">Use a client certificate to fetch this subscription and add it to imported TLS nodes</string>
++    <string name="sub_mtls_server_ca">Subscription server CA</string>
++    <string name="sub_mtls_server_ca_empty">System trust store</string>
++    <string name="sub_mtls_server_ca_select">Select</string>
++    <string name="sub_mtls_server_ca_clear">Clear</string>
++    <string name="sub_mtls_error_server_ca">Invalid subscription server CA file</string>
 +</resources>
+diff --git a/V2rayNG/app/src/test/java/com/v2ray/ang/handler/SubscriptionMtlsTest.kt b/V2rayNG/app/src/test/java/com/v2ray/ang/handler/SubscriptionMtlsTest.kt
+new file mode 100644
+index 0000000..14eda08
+--- /dev/null
++++ b/V2rayNG/app/src/test/java/com/v2ray/ang/handler/SubscriptionMtlsTest.kt
+@@ -0,0 +1,152 @@
++package com.v2ray.ang.handler
++
++import com.v2ray.ang.AppConfig
++import com.v2ray.ang.dto.entities.MtlsCertificateEntry
++import com.v2ray.ang.dto.entities.ProfileItem
++import com.v2ray.ang.dto.entities.SubscriptionItem
++import com.v2ray.ang.enums.EConfigType
++import com.v2ray.ang.util.JsonUtil
++import org.junit.jupiter.api.Assertions.assertEquals
++import org.junit.jupiter.api.Assertions.assertFalse
++import org.junit.jupiter.api.Assertions.assertNull
++import org.junit.jupiter.api.Assertions.assertTrue
++import org.junit.jupiter.api.Test
++
++class SubscriptionMtlsTest {
++
++    private fun entry(
++        usage: String = MtlsCertificateManager.USAGE_CLIENT,
++        complete: Boolean = true,
++    ) = MtlsCertificateEntry(
++        id = "entry-1",
++        usage = usage,
++        certPath = if (complete) "/tmp/client.crt" else "",
++        keyPath = if (complete) "/tmp/client.key" else "",
++        certName = "client.crt",
++        keyName = "client.key",
++    )
++
++    private fun profile(security: String?, type: EConfigType = EConfigType.VLESS) =
++        ProfileItem(configType = type, security = security)
++
++    private fun subscription(
++        enabled: Boolean = true,
++        entries: List<MtlsCertificateEntry>? = listOf(entry()),
++    ) = SubscriptionItem(mtlsEnabled = enabled, mtlsCertificates = entries)
++
++    @Test
++    fun tlsProfileInheritsSubscriptionCertificates() {
++        val result = AngConfigManager.applySubscriptionMtls(profile(AppConfig.TLS), subscription())
++
++        assertTrue(result.mtlsEnabled)
++        val certificates = result.mtlsCertificates.orEmpty()
++        assertEquals(1, certificates.size)
++        assertEquals(MtlsCertificateManager.USAGE_CLIENT, certificates[0].usage)
++        assertEquals("/tmp/client.crt", certificates[0].certPath)
++        assertTrue(certificates[0].id.isNotBlank())
++    }
++
++    @Test
++    fun realityProfileIsUntouched() {
++        val result = AngConfigManager.applySubscriptionMtls(profile(AppConfig.REALITY), subscription())
++
++        assertFalse(result.mtlsEnabled)
++        assertNull(result.mtlsCertificates)
++    }
++
++    @Test
++    fun nonTlsProfileIsUntouched() {
++        val result = AngConfigManager.applySubscriptionMtls(profile(null), subscription())
++
++        assertFalse(result.mtlsEnabled)
++        assertNull(result.mtlsCertificates)
++    }
++
++    @Test
++    fun customProfileIsUntouched() {
++        val result = AngConfigManager.applySubscriptionMtls(
++            profile(AppConfig.TLS, EConfigType.CUSTOM),
++            subscription()
++        )
++
++        assertFalse(result.mtlsEnabled)
++        assertNull(result.mtlsCertificates)
++    }
++
++    @Test
++    fun disabledSubscriptionDoesNotInject() {
++        val result = AngConfigManager.applySubscriptionMtls(
++            profile(AppConfig.TLS),
++            subscription(enabled = false)
++        )
++
++        assertFalse(result.mtlsEnabled)
++        assertNull(result.mtlsCertificates)
++    }
++
++    @Test
++    fun incompleteEntriesAreFilteredOut() {
++        val result = AngConfigManager.applySubscriptionMtls(
++            profile(AppConfig.TLS),
++            subscription(entries = listOf(entry(complete = false)))
++        )
++
++        assertFalse(result.mtlsEnabled)
++        assertNull(result.mtlsCertificates)
++    }
++
++    @Test
++    fun bothUsagesArePreserved() {
++        val result = AngConfigManager.applySubscriptionMtls(
++            profile(AppConfig.TLS),
++            subscription(
++                entries = listOf(
++                    entry(),
++                    entry(usage = MtlsCertificateManager.USAGE_CLIENT_AUTHORITY),
++                )
++            )
++        )
++
++        val usages = result.mtlsCertificates.orEmpty().map { it.usage }
++        assertEquals(
++            listOf(
++                MtlsCertificateManager.USAGE_CLIENT,
++                MtlsCertificateManager.USAGE_CLIENT_AUTHORITY,
++            ),
++            usages
++        )
++    }
++
++    @Test
++    fun subscriptionItemRoundTripsThroughGson() {
++        val item = SubscriptionItem(
++            mtlsEnabled = true,
++            mtlsCertificates = listOf(entry()),
++            serverCaPath = "/tmp/server-ca.pem",
++            serverCaName = "server-ca.pem",
++        )
++
++        val restored = requireNotNull(
++            JsonUtil.fromJson(JsonUtil.toJson(item), SubscriptionItem::class.java)
++        )
++
++        assertTrue(restored.mtlsEnabled)
++        assertEquals(1, restored.mtlsCertificates?.size)
++        assertEquals("/tmp/server-ca.pem", restored.serverCaPath)
++        assertEquals("server-ca.pem", restored.serverCaName)
++    }
++
++    @Test
++    fun legacySubscriptionWithoutNewFieldsKeepsDefaults() {
++        val restored = requireNotNull(
++            JsonUtil.fromJson(
++                """{"remarks":"legacy","url":"https://example.com/sub"}""",
++                SubscriptionItem::class.java
++            )
++        )
++
++        assertFalse(restored.mtlsEnabled)
++        assertNull(restored.mtlsCertificates)
++        assertNull(restored.serverCaPath)
++    }
++}
+diff --git a/V2rayNG/app/src/test/java/com/v2ray/ang/util/MtlsSslContextFactoryTest.kt b/V2rayNG/app/src/test/java/com/v2ray/ang/util/MtlsSslContextFactoryTest.kt
+new file mode 100644
+index 0000000..0da1204
+--- /dev/null
++++ b/V2rayNG/app/src/test/java/com/v2ray/ang/util/MtlsSslContextFactoryTest.kt
+@@ -0,0 +1,82 @@
++package com.v2ray.ang.util
++
++import com.v2ray.ang.handler.MtlsCertificateManager
++import org.junit.jupiter.api.Assertions.assertEquals
++import org.junit.jupiter.api.Assertions.assertFalse
++import org.junit.jupiter.api.Assertions.assertTrue
++import org.junit.jupiter.api.Test
++import java.security.KeyFactory
++import java.security.KeyPairGenerator
++import java.security.interfaces.RSAPrivateKey
++import java.security.spec.PKCS8EncodedKeySpec
++
++class MtlsSslContextFactoryTest {
++
++    @Test
++    fun wrapsPkcs1RsaKeyIntoParseablePkcs8() {
++        val keyPair = KeyPairGenerator.getInstance("RSA").apply { initialize(2048) }.generateKeyPair()
++        val pkcs8 = keyPair.private.encoded
++        val pkcs1 = extractPkcs1(pkcs8)
++
++        val wrapped = MtlsCertificateManager.wrapPkcs1RsaAsPkcs8(pkcs1)
++
++        val parsed = KeyFactory.getInstance("RSA")
++            .generatePrivate(PKCS8EncodedKeySpec(wrapped)) as RSAPrivateKey
++        assertEquals(keyPair.private as RSAPrivateKey, parsed)
++    }
++
++    @Test
++    fun acceptsSameHostHttpsTarget() {
++        assertTrue(HttpUtil.isOriginalTlsTarget("https://example.com/sub", "example.com"))
++        assertTrue(HttpUtil.isOriginalTlsTarget("https://EXAMPLE.com/sub", "example.com"))
++    }
++
++    @Test
++    fun rejectsCrossHostRedirect() {
++        assertFalse(HttpUtil.isOriginalTlsTarget("https://cdn.example.net/sub", "example.com"))
++    }
++
++    @Test
++    fun rejectsNonHttpsTarget() {
++        assertFalse(HttpUtil.isOriginalTlsTarget("http://example.com/sub", "example.com"))
++    }
++
++    @Test
++    fun rejectsMissingHostOrUrl() {
++        assertFalse(HttpUtil.isOriginalTlsTarget(null, "example.com"))
++        assertFalse(HttpUtil.isOriginalTlsTarget("https://example.com/sub", null))
++        assertFalse(HttpUtil.isOriginalTlsTarget("not a url", "example.com"))
++    }
++
++    private fun extractPkcs1(pkcs8: ByteArray): ByteArray {
++        assertEquals(0x30, pkcs8[0].toInt() and 0xff)
++        var offset = 1
++        val (_, outerLengthSize) = readLength(pkcs8, offset)
++        offset += outerLengthSize
++
++        offset = skipElement(pkcs8, offset)
++        offset = skipElement(pkcs8, offset)
++
++        val tag = pkcs8[offset].toInt() and 0xff
++        assertEquals(0x04, tag)
++        val (length, lengthSize) = readLength(pkcs8, offset + 1)
++        val start = offset + 1 + lengthSize
++        return pkcs8.copyOfRange(start, start + length)
++    }
++
++    private fun skipElement(data: ByteArray, offset: Int): Int {
++        val (length, lengthSize) = readLength(data, offset + 1)
++        return offset + 1 + lengthSize + length
++    }
++
++    private fun readLength(data: ByteArray, offset: Int): Pair<Int, Int> {
++        val first = data[offset].toInt() and 0xff
++        if (first < 0x80) return first to 1
++        val count = first and 0x7f
++        var value = 0
++        for (index in 1..count) {
++            value = (value shl 8) or (data[offset + index].toInt() and 0xff)
++        }
++        return value to (1 + count)
++    }
++}
