@@ -1,5 +1,5 @@
 diff --git a/V2rayNG/app/src/main/java/com/v2ray/ang/core/CoreOutboundBuilder.kt b/V2rayNG/app/src/main/java/com/v2ray/ang/core/CoreOutboundBuilder.kt
-index 33ec71b..236bead 100644
+index 33ec71b2b86deb5db70a7330de18cda06ea9003b..236bead78597dbf4b4abf6d1b2c16e59b853a98b 100644
 --- a/V2rayNG/app/src/main/java/com/v2ray/ang/core/CoreOutboundBuilder.kt
 +++ b/V2rayNG/app/src/main/java/com/v2ray/ang/core/CoreOutboundBuilder.kt
 @@ -10,6 +10,7 @@ import com.v2ray.ang.enums.NetworkType
@@ -42,7 +42,7 @@ index 33ec71b..236bead 100644
              verifyPeerCertByName = profileItem.verifyPeerCertByName.nullIfBlank(),
              pinnedPeerCertSha256 = profileItem.pinnedCA256.nullIfBlank(),
 diff --git a/V2rayNG/app/src/main/java/com/v2ray/ang/dto/UrlContentRequest.kt b/V2rayNG/app/src/main/java/com/v2ray/ang/dto/UrlContentRequest.kt
-index c8440a4..62c56e3 100644
+index c8440a4f3d0a9b3dfb0a74729e2f13eb34e1eefa..62c56e3a3c30c2700f4899f28beef0c18687a0c2 100644
 --- a/V2rayNG/app/src/main/java/com/v2ray/ang/dto/UrlContentRequest.kt
 +++ b/V2rayNG/app/src/main/java/com/v2ray/ang/dto/UrlContentRequest.kt
 @@ -7,5 +7,8 @@ data class UrlContentRequest(
@@ -59,7 +59,7 @@ index c8440a4..62c56e3 100644
 +)
 diff --git a/V2rayNG/app/src/main/java/com/v2ray/ang/dto/entities/MtlsCertificateEntry.kt b/V2rayNG/app/src/main/java/com/v2ray/ang/dto/entities/MtlsCertificateEntry.kt
 new file mode 100644
-index 0000000..6ad7439
+index 0000000000000000000000000000000000000000..6ad7439d55808420749446bf2c82b766e457e1a6
 --- /dev/null
 +++ b/V2rayNG/app/src/main/java/com/v2ray/ang/dto/entities/MtlsCertificateEntry.kt
 @@ -0,0 +1,23 @@
@@ -87,7 +87,7 @@ index 0000000..6ad7439
 +    fun isComplete(): Boolean = certPath.isNotBlank() && keyPath.isNotBlank()
 +}
 diff --git a/V2rayNG/app/src/main/java/com/v2ray/ang/dto/entities/ProfileItem.kt b/V2rayNG/app/src/main/java/com/v2ray/ang/dto/entities/ProfileItem.kt
-index 223ccf7..de67794 100644
+index 8d60f39470b9946433d1bf8cd2f725c13dde4d91..4ba61b932eeadf6ce65901bcc4e1433f99e8cc11 100644
 --- a/V2rayNG/app/src/main/java/com/v2ray/ang/dto/entities/ProfileItem.kt
 +++ b/V2rayNG/app/src/main/java/com/v2ray/ang/dto/entities/ProfileItem.kt
 @@ -47,6 +47,8 @@ data class ProfileItem(
@@ -100,7 +100,7 @@ index 223ccf7..de67794 100644
      var publicKey: String? = null,
      var shortId: String? = null,
 diff --git a/V2rayNG/app/src/main/java/com/v2ray/ang/dto/entities/SubscriptionItem.kt b/V2rayNG/app/src/main/java/com/v2ray/ang/dto/entities/SubscriptionItem.kt
-index 258400f..4c8fbe1 100644
+index 258400fe0c74decc07cf492e08b8ffb09b64737b..4c8fbe1e9d938b78a894a4ef0d6770bae8687a2e 100644
 --- a/V2rayNG/app/src/main/java/com/v2ray/ang/dto/entities/SubscriptionItem.kt
 +++ b/V2rayNG/app/src/main/java/com/v2ray/ang/dto/entities/SubscriptionItem.kt
 @@ -15,5 +15,9 @@ data class SubscriptionItem(
@@ -114,7 +114,7 @@ index 258400f..4c8fbe1 100644
  )
  
 diff --git a/V2rayNG/app/src/main/java/com/v2ray/ang/handler/AngConfigManager.kt b/V2rayNG/app/src/main/java/com/v2ray/ang/handler/AngConfigManager.kt
-index 686a509..f4630fb 100644
+index 686a509c909e583c037cd8f968b79e6863f1e722..f4630fb6e9cf3286a363cdf72604107874d67e2b 100644
 --- a/V2rayNG/app/src/main/java/com/v2ray/ang/handler/AngConfigManager.kt
 +++ b/V2rayNG/app/src/main/java/com/v2ray/ang/handler/AngConfigManager.kt
 @@ -31,6 +31,7 @@ import com.v2ray.ang.util.QRCodeDecoder
@@ -213,7 +213,7 @@ index 686a509..f4630fb 100644
                      )
 diff --git a/V2rayNG/app/src/main/java/com/v2ray/ang/handler/MtlsCertificateManager.kt b/V2rayNG/app/src/main/java/com/v2ray/ang/handler/MtlsCertificateManager.kt
 new file mode 100644
-index 0000000..78f9a53
+index 0000000000000000000000000000000000000000..78f9a5300eadee8ca08348746845cb152a96332a
 --- /dev/null
 +++ b/V2rayNG/app/src/main/java/com/v2ray/ang/handler/MtlsCertificateManager.kt
 @@ -0,0 +1,296 @@
@@ -514,7 +514,7 @@ index 0000000..78f9a53
 +    }
 +}
 diff --git a/V2rayNG/app/src/main/java/com/v2ray/ang/ui/server/BaseServerActivity.kt b/V2rayNG/app/src/main/java/com/v2ray/ang/ui/server/BaseServerActivity.kt
-index 59580f1..d7553b9 100644
+index 59580f1fe90ff9aa56a37fb219635ce452ecac4b..d7553b902b27655ddeedd24b6a6cea35ae00c2f5 100644
 --- a/V2rayNG/app/src/main/java/com/v2ray/ang/ui/server/BaseServerActivity.kt
 +++ b/V2rayNG/app/src/main/java/com/v2ray/ang/ui/server/BaseServerActivity.kt
 @@ -28,6 +28,7 @@ import androidx.compose.ui.res.stringArrayResource
@@ -643,7 +643,7 @@ index 59580f1..d7553b9 100644
          val config = state.toProfileItem(initialConfig)
 diff --git a/V2rayNG/app/src/main/java/com/v2ray/ang/ui/server/MtlsCertificatesSection.kt b/V2rayNG/app/src/main/java/com/v2ray/ang/ui/server/MtlsCertificatesSection.kt
 new file mode 100644
-index 0000000..7f90801
+index 0000000000000000000000000000000000000000..7f90801626834ec58035f65516a610c96213e9b4
 --- /dev/null
 +++ b/V2rayNG/app/src/main/java/com/v2ray/ang/ui/server/MtlsCertificatesSection.kt
 @@ -0,0 +1,199 @@
@@ -847,7 +847,7 @@ index 0000000..7f90801
 +    }
 +}
 diff --git a/V2rayNG/app/src/main/java/com/v2ray/ang/ui/server/ServerUiState.kt b/V2rayNG/app/src/main/java/com/v2ray/ang/ui/server/ServerUiState.kt
-index 5f1e52e..17fb018 100644
+index 5f1e52e415b1157613a6549dede839c926ea50c1..17fb0186a61f416c95c5410ddc22418d7ee71177 100644
 --- a/V2rayNG/app/src/main/java/com/v2ray/ang/ui/server/ServerUiState.kt
 +++ b/V2rayNG/app/src/main/java/com/v2ray/ang/ui/server/ServerUiState.kt
 @@ -1,6 +1,7 @@
@@ -921,7 +921,7 @@ index 5f1e52e..17fb018 100644
  
          fun from(
 diff --git a/V2rayNG/app/src/main/java/com/v2ray/ang/ui/subscription/SubEditActivity.kt b/V2rayNG/app/src/main/java/com/v2ray/ang/ui/subscription/SubEditActivity.kt
-index 9a72add..7df2166 100644
+index 9a72addfbed8373de3d5a1f52212349388802adc..7df2166a65a279c0ae80532248a37e189f0098b5 100644
 --- a/V2rayNG/app/src/main/java/com/v2ray/ang/ui/subscription/SubEditActivity.kt
 +++ b/V2rayNG/app/src/main/java/com/v2ray/ang/ui/subscription/SubEditActivity.kt
 @@ -22,8 +22,11 @@ import androidx.compose.material3.Text
@@ -1205,7 +1205,7 @@ index 9a72add..7df2166 100644
                  placeholder = stringResource(R.string.sub_setting_pre_profile_tip),
 diff --git a/V2rayNG/app/src/main/java/com/v2ray/ang/ui/subscription/SubscriptionMtlsSection.kt b/V2rayNG/app/src/main/java/com/v2ray/ang/ui/subscription/SubscriptionMtlsSection.kt
 new file mode 100644
-index 0000000..a0571d5
+index 0000000000000000000000000000000000000000..a0571d5482fd6a4e58ed42cc0e5e1cee75e3d316
 --- /dev/null
 +++ b/V2rayNG/app/src/main/java/com/v2ray/ang/ui/subscription/SubscriptionMtlsSection.kt
 @@ -0,0 +1,101 @@
@@ -1311,10 +1311,10 @@ index 0000000..a0571d5
 +    }
 +}
 diff --git a/V2rayNG/app/src/main/java/com/v2ray/ang/util/HttpUtil.kt b/V2rayNG/app/src/main/java/com/v2ray/ang/util/HttpUtil.kt
-index 12b92e3..070c55b 100644
+index cbcc6f6172b9292a528a5b022c54f24a4b1aefc2..70fc2d30381358e80ccefc0e617f624af448363b 100644
 --- a/V2rayNG/app/src/main/java/com/v2ray/ang/util/HttpUtil.kt
 +++ b/V2rayNG/app/src/main/java/com/v2ray/ang/util/HttpUtil.kt
-@@ -112,7 +112,14 @@ object HttpUtil {
+@@ -114,7 +114,14 @@ object HttpUtil {
       */
      fun getUrlContent(request: UrlContentRequest): String? {
          val url = request.url ?: return null
@@ -1330,11 +1330,15 @@ index 12b92e3..070c55b 100644
          val requestBuilder = Request.Builder()
              .url(url)
              .get()
-@@ -152,10 +159,18 @@ object HttpUtil {
+@@ -154,6 +161,7 @@ object HttpUtil {
          var currentUrl = request.url
          var redirects = 0
          val maxRedirects = 3
 +        val originalHost = request.url?.let { runCatching { URL(it).host }.getOrNull() }
+ 
+         // Store origin
+         val originalUrl = requireNotNull(request.url).toHttpUrl()
+@@ -161,7 +169,14 @@ object HttpUtil {
  
          while (redirects++ < maxRedirects) {
              if (currentUrl == null) continue
@@ -1350,7 +1354,7 @@ index 12b92e3..070c55b 100644
              val finalUserAgent = if (request.userAgent.isNullOrBlank()) {
                  "v2rayNG/${BuildConfig.VERSION_NAME}"
              } else {
-@@ -230,7 +245,8 @@ object HttpUtil {
+@@ -242,7 +257,8 @@ object HttpUtil {
          httpPort: Int,
          proxyUsername: String?,
          proxyPassword: String?,
@@ -1360,7 +1364,7 @@ index 12b92e3..070c55b 100644
      ): OkHttpClient {
          val builder = OkHttpClient.Builder()
              .connectTimeout(timeout.toLong(), TimeUnit.MILLISECONDS)
-@@ -238,6 +254,10 @@ object HttpUtil {
+@@ -250,6 +266,10 @@ object HttpUtil {
              .followRedirects(followRedirects)
              .followSslRedirects(followRedirects)
  
@@ -1371,7 +1375,7 @@ index 12b92e3..070c55b 100644
          if (httpPort != 0) {
              builder.proxy(Proxy(Proxy.Type.HTTP, InetSocketAddress(LOOPBACK, httpPort)))
              if (!proxyUsername.isNullOrBlank() && !proxyPassword.isNullOrBlank()) {
-@@ -256,6 +276,41 @@ object HttpUtil {
+@@ -268,6 +288,41 @@ object HttpUtil {
          return builder.build()
      }
  
@@ -1413,7 +1417,7 @@ index 12b92e3..070c55b 100644
      private fun resolveLocation(baseUrl: String, raw: String): String? {
          return try {
              val locUri = URI(raw)
-@@ -280,7 +335,14 @@ object HttpUtil {
+@@ -292,7 +347,14 @@ object HttpUtil {
          targetFile: File
      ): Boolean {
          val url = request.url ?: return false
@@ -1431,7 +1435,7 @@ index 12b92e3..070c55b 100644
              .get()
 diff --git a/V2rayNG/app/src/main/java/com/v2ray/ang/util/MtlsSslContextFactory.kt b/V2rayNG/app/src/main/java/com/v2ray/ang/util/MtlsSslContextFactory.kt
 new file mode 100644
-index 0000000..456967e
+index 0000000000000000000000000000000000000000..456967ef7d91d9b5b8f0d9935ea44ad6290d0faa
 --- /dev/null
 +++ b/V2rayNG/app/src/main/java/com/v2ray/ang/util/MtlsSslContextFactory.kt
 @@ -0,0 +1,164 @@
@@ -1601,7 +1605,7 @@ index 0000000..456967e
 +}
 diff --git a/V2rayNG/app/src/main/res/values-zh-rCN/strings_mtls.xml b/V2rayNG/app/src/main/res/values-zh-rCN/strings_mtls.xml
 new file mode 100644
-index 0000000..e5a8a49
+index 0000000000000000000000000000000000000000..e5a8a494f0fc635bcf67dafafa96bee775203782
 --- /dev/null
 +++ b/V2rayNG/app/src/main/res/values-zh-rCN/strings_mtls.xml
 @@ -0,0 +1,27 @@
@@ -1634,7 +1638,7 @@ index 0000000..e5a8a49
 +</resources>
 diff --git a/V2rayNG/app/src/main/res/values/strings_mtls.xml b/V2rayNG/app/src/main/res/values/strings_mtls.xml
 new file mode 100644
-index 0000000..1b51de4
+index 0000000000000000000000000000000000000000..1b51de40399f3ece5b84be4ebff23a1fefea8c9c
 --- /dev/null
 +++ b/V2rayNG/app/src/main/res/values/strings_mtls.xml
 @@ -0,0 +1,27 @@
@@ -1667,7 +1671,7 @@ index 0000000..1b51de4
 +</resources>
 diff --git a/V2rayNG/app/src/test/java/com/v2ray/ang/handler/SubscriptionMtlsTest.kt b/V2rayNG/app/src/test/java/com/v2ray/ang/handler/SubscriptionMtlsTest.kt
 new file mode 100644
-index 0000000..14eda08
+index 0000000000000000000000000000000000000000..14eda08001e03ae0376b3a3abae919cf88637ec1
 --- /dev/null
 +++ b/V2rayNG/app/src/test/java/com/v2ray/ang/handler/SubscriptionMtlsTest.kt
 @@ -0,0 +1,152 @@
@@ -1825,7 +1829,7 @@ index 0000000..14eda08
 +}
 diff --git a/V2rayNG/app/src/test/java/com/v2ray/ang/util/MtlsSslContextFactoryTest.kt b/V2rayNG/app/src/test/java/com/v2ray/ang/util/MtlsSslContextFactoryTest.kt
 new file mode 100644
-index 0000000..0da1204
+index 0000000000000000000000000000000000000000..0da1204f034584eacb49e75355553fa0303bc8fe
 --- /dev/null
 +++ b/V2rayNG/app/src/test/java/com/v2ray/ang/util/MtlsSslContextFactoryTest.kt
 @@ -0,0 +1,82 @@
